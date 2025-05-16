@@ -5,13 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  *
  */
-import type {
-  TableCellNode,
-  TableDOMCell,
-  TableMapType,
-  TableMapValueType,
-} from '@lexical/table';
-import type {LexicalEditor} from 'lexical';
+import type {TableCellNode, TableDOMCell, TableMapType} from '@lexical/table';
+import type {LexicalEditor, NodeKey} from 'lexical';
+import type {JSX} from 'react';
 
 import './index.css';
 
@@ -24,12 +20,19 @@ import {
   $isTableCellNode,
   $isTableRowNode,
   getDOMCellFromTarget,
+  getTableElement,
+  TableNode,
 } from '@lexical/table';
-import {calculateZoomLevel} from '@lexical/utils';
-import {$getNearestNodeFromDOMNode} from 'lexical';
+import {calculateZoomLevel, mergeRegister} from '@lexical/utils';
+import {
+  $getNearestNodeFromDOMNode,
+  isHTMLElement,
+  SKIP_SCROLL_INTO_VIEW_TAG,
+} from 'lexical';
 import * as React from 'react';
 import {
-  MouseEventHandler,
+  CSSProperties,
+  PointerEventHandler,
   ReactPortal,
   useCallback,
   useEffect,
@@ -39,65 +42,96 @@ import {
 } from 'react';
 import {createPortal} from 'react-dom';
 
-type MousePosition = {
+type PointerPosition = {
   x: number;
   y: number;
 };
 
-type MouseDraggingDirection = 'right' | 'bottom';
+type PointerDraggingDirection = 'right' | 'bottom';
 
 const MIN_ROW_HEIGHT = 33;
-const MIN_COLUMN_WIDTH = 50;
+const MIN_COLUMN_WIDTH = 92;
 
 function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
   const targetRef = useRef<HTMLElement | null>(null);
   const resizerRef = useRef<HTMLDivElement | null>(null);
   const tableRectRef = useRef<ClientRect | null>(null);
+  const [hasTable, setHasTable] = useState(false);
 
-  const mouseStartPosRef = useRef<MousePosition | null>(null);
-  const [mouseCurrentPos, updateMouseCurrentPos] =
-    useState<MousePosition | null>(null);
+  const pointerStartPosRef = useRef<PointerPosition | null>(null);
+  const [pointerCurrentPos, updatePointerCurrentPos] =
+    useState<PointerPosition | null>(null);
 
   const [activeCell, updateActiveCell] = useState<TableDOMCell | null>(null);
-  const [isMouseDown, updateIsMouseDown] = useState<boolean>(false);
   const [draggingDirection, updateDraggingDirection] =
-    useState<MouseDraggingDirection | null>(null);
+    useState<PointerDraggingDirection | null>(null);
 
   const resetState = useCallback(() => {
     updateActiveCell(null);
     targetRef.current = null;
     updateDraggingDirection(null);
-    mouseStartPosRef.current = null;
+    pointerStartPosRef.current = null;
     tableRectRef.current = null;
   }, []);
 
-  const isMouseDownOnEvent = (event: MouseEvent) => {
-    return (event.buttons & 1) === 1;
-  };
+  useEffect(() => {
+    const tableKeys = new Set<NodeKey>();
+    return mergeRegister(
+      editor.registerMutationListener(TableNode, (nodeMutations) => {
+        for (const [nodeKey, mutation] of nodeMutations) {
+          if (mutation === 'destroyed') {
+            tableKeys.delete(nodeKey);
+          } else {
+            tableKeys.add(nodeKey);
+          }
+        }
+        setHasTable(tableKeys.size > 0);
+      }),
+      editor.registerNodeTransform(TableNode, (tableNode) => {
+        if (tableNode.getColWidths()) {
+          return tableNode;
+        }
+
+        const numColumns = tableNode.getColumnCount();
+        const columnWidth = MIN_COLUMN_WIDTH;
+
+        tableNode.setColWidths(Array(numColumns).fill(columnWidth));
+        return tableNode;
+      }),
+    );
+  }, [editor]);
 
   useEffect(() => {
-    const onMouseMove = (event: MouseEvent) => {
-      setTimeout(() => {
-        const target = event.target;
+    if (!hasTable) {
+      return;
+    }
 
-        if (draggingDirection) {
-          updateMouseCurrentPos({
-            x: event.clientX,
-            y: event.clientY,
-          });
-          return;
-        }
-        updateIsMouseDown(isMouseDownOnEvent(event));
-        if (resizerRef.current && resizerRef.current.contains(target as Node)) {
-          return;
-        }
+    const onPointerMove = (event: PointerEvent) => {
+      const target = event.target;
+      if (!isHTMLElement(target)) {
+        return;
+      }
 
-        if (targetRef.current !== target) {
-          targetRef.current = target as HTMLElement;
-          const cell = getDOMCellFromTarget(target as HTMLElement);
+      if (draggingDirection) {
+        event.preventDefault();
+        event.stopPropagation();
+        updatePointerCurrentPos({
+          x: event.clientX,
+          y: event.clientY,
+        });
+        return;
+      }
+      if (resizerRef.current && resizerRef.current.contains(target)) {
+        return;
+      }
 
-          if (cell && activeCell !== cell) {
-            editor.update(() => {
+      if (targetRef.current !== target) {
+        targetRef.current = target;
+        const cell = getDOMCellFromTarget(target);
+
+        if (cell && activeCell !== cell) {
+          editor.getEditorState().read(
+            () => {
               const tableCellNode = $getNearestNodeFromDOMNode(cell.elem);
               if (!tableCellNode) {
                 throw new Error('TableCellResizer: Table cell node not found.');
@@ -105,7 +139,10 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
 
               const tableNode =
                 $getTableNodeFromLexicalNodeOrThrow(tableCellNode);
-              const tableElement = editor.getElementByKey(tableNode.getKey());
+              const tableElement = getTableElement(
+                tableNode,
+                editor.getElementByKey(tableNode.getKey()),
+              );
 
               if (!tableElement) {
                 throw new Error('TableCellResizer: Table element not found.');
@@ -114,38 +151,43 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
               targetRef.current = target as HTMLElement;
               tableRectRef.current = tableElement.getBoundingClientRect();
               updateActiveCell(cell);
-            });
-          } else if (cell == null) {
-            resetState();
-          }
+            },
+            {editor},
+          );
+        } else if (cell == null) {
+          resetState();
         }
-      }, 0);
+      }
     };
 
-    const onMouseDown = (event: MouseEvent) => {
-      setTimeout(() => {
-        updateIsMouseDown(true);
-      }, 0);
+    const onPointerDown = (event: PointerEvent) => {
+      const isTouchEvent = event.pointerType === 'touch';
+      if (isTouchEvent) {
+        onPointerMove(event);
+      }
     };
 
-    const onMouseUp = (event: MouseEvent) => {
-      setTimeout(() => {
-        updateIsMouseDown(false);
-      }, 0);
-    };
+    const resizerContainer = resizerRef.current;
+    resizerContainer?.addEventListener('pointermove', onPointerMove, {
+      capture: true,
+    });
 
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('mouseup', onMouseUp);
+    const removeRootListener = editor.registerRootListener(
+      (rootElement, prevRootElement) => {
+        prevRootElement?.removeEventListener('pointermove', onPointerMove);
+        prevRootElement?.removeEventListener('pointerdown', onPointerDown);
+        rootElement?.addEventListener('pointermove', onPointerMove);
+        rootElement?.addEventListener('pointerdown', onPointerDown);
+      },
+    );
 
     return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mousedown', onMouseDown);
-      document.removeEventListener('mouseup', onMouseUp);
+      removeRootListener();
+      resizerContainer?.removeEventListener('pointermove', onPointerMove);
     };
-  }, [activeCell, draggingDirection, editor, resetState]);
+  }, [activeCell, draggingDirection, editor, resetState, hasTable]);
 
-  const isHeightChanging = (direction: MouseDraggingDirection) => {
+  const isHeightChanging = (direction: PointerDraggingDirection) => {
     if (direction === 'bottom') {
       return true;
     }
@@ -166,11 +208,18 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
           }
 
           const tableNode = $getTableNodeFromLexicalNodeOrThrow(tableCellNode);
-
-          const tableRowIndex =
+          const baseRowIndex =
             $getTableRowIndexFromTableCellNode(tableCellNode);
-
           const tableRows = tableNode.getChildren();
+
+          // Determine if this is a full row merge by checking colspan
+          const isFullRowMerge =
+            tableCellNode.getColSpan() === tableNode.getColumnCount();
+
+          // For full row merges, apply to first row. For partial merges, apply to last row
+          const tableRowIndex = isFullRowMerge
+            ? baseRowIndex
+            : baseRowIndex + tableCellNode.getRowSpan() - 1;
 
           if (tableRowIndex >= tableRows.length || tableRowIndex < 0) {
             throw new Error('Expected table cell to be inside of table row.');
@@ -195,32 +244,11 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
           const newHeight = Math.max(height + heightChange, MIN_ROW_HEIGHT);
           tableRow.setHeight(newHeight);
         },
-        {tag: 'skip-scroll-into-view'},
+        {tag: SKIP_SCROLL_INTO_VIEW_TAG},
       );
     },
     [activeCell, editor],
   );
-
-  const getCellNodeWidth = (
-    cell: TableCellNode,
-    activeEditor: LexicalEditor,
-  ): number | undefined => {
-    const width = cell.getWidth();
-    if (width !== undefined) {
-      return width;
-    }
-
-    const domCellNode = activeEditor.getElementByKey(cell.getKey());
-    if (domCellNode == null) {
-      return undefined;
-    }
-    const computedStyle = getComputedStyle(domCellNode);
-    return (
-      domCellNode.clientWidth -
-      parseFloat(computedStyle.paddingLeft) -
-      parseFloat(computedStyle.paddingRight)
-    );
-  };
 
   const getCellNodeHeight = (
     cell: TableCellNode,
@@ -266,32 +294,28 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
             throw new Error('TableCellResizer: Table column not found.');
           }
 
-          for (let row = 0; row < tableMap.length; row++) {
-            const cell: TableMapValueType = tableMap[row][columnIndex];
-            if (
-              cell.startRow === row &&
-              (columnIndex === tableMap[row].length - 1 ||
-                tableMap[row][columnIndex].cell !==
-                  tableMap[row][columnIndex + 1].cell)
-            ) {
-              const width = getCellNodeWidth(cell.cell, editor);
-              if (width === undefined) {
-                continue;
-              }
-              const newWidth = Math.max(width + widthChange, MIN_COLUMN_WIDTH);
-              cell.cell.setWidth(newWidth);
-            }
+          const colWidths = tableNode.getColWidths();
+          if (!colWidths) {
+            return;
           }
+          const width = colWidths[columnIndex];
+          if (width === undefined) {
+            return;
+          }
+          const newColWidths = [...colWidths];
+          const newWidth = Math.max(width + widthChange, MIN_COLUMN_WIDTH);
+          newColWidths[columnIndex] = newWidth;
+          tableNode.setColWidths(newColWidths);
         },
-        {tag: 'skip-scroll-into-view'},
+        {tag: SKIP_SCROLL_INTO_VIEW_TAG},
       );
     },
     [activeCell, editor],
   );
 
-  const mouseUpHandler = useCallback(
-    (direction: MouseDraggingDirection) => {
-      const handler = (event: MouseEvent) => {
+  const pointerUpHandler = useCallback(
+    (direction: PointerDraggingDirection) => {
+      const handler = (event: PointerEvent) => {
         event.preventDefault();
         event.stopPropagation();
 
@@ -299,8 +323,8 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
           throw new Error('TableCellResizer: Expected active cell.');
         }
 
-        if (mouseStartPosRef.current) {
-          const {x, y} = mouseStartPosRef.current;
+        if (pointerStartPosRef.current) {
+          const {x, y} = pointerStartPosRef.current;
 
           if (activeCell === null) {
             return;
@@ -316,7 +340,7 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
           }
 
           resetState();
-          document.removeEventListener('mouseup', handler);
+          document.removeEventListener('pointerup', handler);
         }
       };
       return handler;
@@ -325,7 +349,9 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
   );
 
   const toggleResize = useCallback(
-    (direction: MouseDraggingDirection): MouseEventHandler<HTMLDivElement> =>
+    (
+        direction: PointerDraggingDirection,
+      ): PointerEventHandler<HTMLDivElement> =>
       (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -334,16 +360,16 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
           throw new Error('TableCellResizer: Expected active cell.');
         }
 
-        mouseStartPosRef.current = {
+        pointerStartPosRef.current = {
           x: event.clientX,
           y: event.clientY,
         };
-        updateMouseCurrentPos(mouseStartPosRef.current);
+        updatePointerCurrentPos(pointerStartPosRef.current);
         updateDraggingDirection(direction);
 
-        document.addEventListener('mouseup', mouseUpHandler(direction));
+        document.addEventListener('pointerup', pointerUpHandler(direction));
       },
-    [activeCell, mouseUpHandler],
+    [activeCell, pointerUpHandler],
   );
 
   const getResizers = useCallback(() => {
@@ -351,50 +377,49 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
       const {height, width, top, left} =
         activeCell.elem.getBoundingClientRect();
       const zoom = calculateZoomLevel(activeCell.elem);
-      const zoneWidth = 10; // Pixel width of the zone where you can drag the edge
-      const styles = {
+      const zoneWidth = 16; // Pixel width of the zone where you can drag the edge
+      const styles: Record<string, CSSProperties> = {
         bottom: {
           backgroundColor: 'none',
           cursor: 'row-resize',
           height: `${zoneWidth}px`,
-          left: `${window.pageXOffset + left}px`,
-          top: `${window.pageYOffset + top + height - zoneWidth / 2}px`,
+          left: `${window.scrollX + left}px`,
+          top: `${window.scrollY + top + height - zoneWidth / 2}px`,
           width: `${width}px`,
         },
         right: {
           backgroundColor: 'none',
           cursor: 'col-resize',
           height: `${height}px`,
-          left: `${window.pageXOffset + left + width - zoneWidth / 2}px`,
-          top: `${window.pageYOffset + top}px`,
+          left: `${window.scrollX + left + width - zoneWidth / 2}px`,
+          top: `${window.scrollY + top}px`,
           width: `${zoneWidth}px`,
         },
       };
 
       const tableRect = tableRectRef.current;
 
-      if (draggingDirection && mouseCurrentPos && tableRect) {
+      if (draggingDirection && pointerCurrentPos && tableRect) {
         if (isHeightChanging(draggingDirection)) {
           styles[draggingDirection].left = `${
-            window.pageXOffset + tableRect.left
+            window.scrollX + tableRect.left
           }px`;
           styles[draggingDirection].top = `${
-            window.pageYOffset + mouseCurrentPos.y / zoom
+            window.scrollY + pointerCurrentPos.y / zoom
           }px`;
           styles[draggingDirection].height = '3px';
           styles[draggingDirection].width = `${tableRect.width}px`;
         } else {
-          styles[draggingDirection].top = `${
-            window.pageYOffset + tableRect.top
-          }px`;
+          styles[draggingDirection].top = `${window.scrollY + tableRect.top}px`;
           styles[draggingDirection].left = `${
-            window.pageXOffset + mouseCurrentPos.x / zoom
+            window.scrollX + pointerCurrentPos.x / zoom
           }px`;
           styles[draggingDirection].width = '3px';
           styles[draggingDirection].height = `${tableRect.height}px`;
         }
 
         styles[draggingDirection].backgroundColor = '#adf';
+        styles[draggingDirection].mixBlendMode = 'unset';
       }
 
       return styles;
@@ -406,23 +431,23 @@ function TableCellResizer({editor}: {editor: LexicalEditor}): JSX.Element {
       right: null,
       top: null,
     };
-  }, [activeCell, draggingDirection, mouseCurrentPos]);
+  }, [activeCell, draggingDirection, pointerCurrentPos]);
 
   const resizerStyles = getResizers();
 
   return (
     <div ref={resizerRef}>
-      {activeCell != null && !isMouseDown && (
+      {activeCell != null && (
         <>
           <div
             className="TableCellResizer__resizer TableCellResizer__ui"
             style={resizerStyles.right || undefined}
-            onMouseDown={toggleResize('right')}
+            onPointerDown={toggleResize('right')}
           />
           <div
             className="TableCellResizer__resizer TableCellResizer__ui"
             style={resizerStyles.bottom || undefined}
-            onMouseDown={toggleResize('bottom')}
+            onPointerDown={toggleResize('bottom')}
           />
         </>
       )}

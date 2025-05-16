@@ -47,7 +47,10 @@ function updatePackage(pkg) {
 function updateVersion() {
   packagesManager.getPackages().forEach(updatePackage);
   glob
-    .sync('./examples/*/package.json')
+    .sync([
+      './examples/*/package.json',
+      './scripts/__tests__/integration/fixtures/*/package.json',
+    ])
     .forEach((packageJsonPath) =>
       updatePackage(new PackageMetadata(packageJsonPath)),
     );
@@ -169,7 +172,7 @@ function sortDependencies(packageJson, key, deps) {
 }
 
 /**
- * Update depdenencies and peerDependencies in pkg in-place.
+ * Update dependencies and peerDependencies in pkg in-place.
  * All entries for monorepo packages will be updated to version.
  * All peerDependencies for monorepo packages will be moved to dependencies.
  *

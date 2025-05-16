@@ -6,7 +6,7 @@
  *
  */
 
-import type {ListNode} from './';
+import type {ListNode, ListType} from './';
 import type {
   BaseSelection,
   DOMConversionMap,
@@ -15,6 +15,7 @@ import type {
   EditorConfig,
   EditorThemeClasses,
   LexicalNode,
+  LexicalUpdateJSON,
   NodeKey,
   ParagraphNode,
   RangeSelection,
@@ -22,6 +23,7 @@ import type {
   Spread,
 } from 'lexical';
 
+import {getStyleObjectFromCSS} from '@lexical/selection';
 import {
   addClassNamesToElement,
   removeClassNamesFromElement,
@@ -49,6 +51,26 @@ export type SerializedListItemNode = Spread<
   },
   SerializedElementNode
 >;
+
+function applyMarkerStyles(
+  dom: HTMLElement,
+  node: ListItemNode,
+  prevNode: ListItemNode | null,
+): void {
+  const styles: Record<string, string> = getStyleObjectFromCSS(
+    node.__textStyle,
+  );
+  for (const k in styles) {
+    dom.style.setProperty(`--listitem-marker-${k}`, styles[k]);
+  }
+  if (prevNode) {
+    for (const k in getStyleObjectFromCSS(prevNode.__textStyle)) {
+      if (!(k in styles)) {
+        dom.style.removeProperty(`--listitem-marker-${k}`);
+      }
+    }
+  }
+}
 
 /** @noInheritDoc */
 export class ListItemNode extends ElementNode {
@@ -79,6 +101,11 @@ export class ListItemNode extends ElementNode {
     }
     element.value = this.__value;
     $setListItemThemeClassNames(element, config.theme, this);
+    const nextStyle = this.__style;
+    if (nextStyle) {
+      element.style.cssText = nextStyle;
+    }
+    applyMarkerStyles(element, this, null);
     return element;
   }
 
@@ -94,7 +121,16 @@ export class ListItemNode extends ElementNode {
     // @ts-expect-error - this is always HTMLListItemElement
     dom.value = this.__value;
     $setListItemThemeClassNames(dom, config.theme, this);
-
+    const prevStyle = prevNode.__style;
+    const nextStyle = this.__style;
+    if (prevStyle !== nextStyle) {
+      if (nextStyle === '') {
+        dom.removeAttribute('style');
+      } else {
+        dom.style.cssText = nextStyle;
+      }
+    }
+    applyMarkerStyles(dom, this, prevNode);
     return false;
   }
 
@@ -123,17 +159,31 @@ export class ListItemNode extends ElementNode {
   }
 
   static importJSON(serializedNode: SerializedListItemNode): ListItemNode {
-    const node = $createListItemNode();
-    node.setChecked(serializedNode.checked);
-    node.setValue(serializedNode.value);
-    node.setFormat(serializedNode.format);
-    node.setDirection(serializedNode.direction);
-    return node;
+    return $createListItemNode().updateFromJSON(serializedNode);
+  }
+
+  updateFromJSON(
+    serializedNode: LexicalUpdateJSON<SerializedListItemNode>,
+  ): this {
+    return super
+      .updateFromJSON(serializedNode)
+      .setValue(serializedNode.value)
+      .setChecked(serializedNode.checked);
   }
 
   exportDOM(editor: LexicalEditor): DOMExportOutput {
     const element = this.createDOM(editor._config);
-    element.style.textAlign = this.getFormatType();
+
+    const formatType = this.getFormatType();
+    if (formatType) {
+      element.style.textAlign = formatType;
+    }
+
+    const direction = this.getDirection();
+    if (direction) {
+      element.dir = direction;
+    }
+
     return {
       element,
     };
@@ -143,9 +193,7 @@ export class ListItemNode extends ElementNode {
     return {
       ...super.exportJSON(),
       checked: this.getChecked(),
-      type: 'listitem',
       value: this.getValue(),
-      version: 1,
     };
   }
 
@@ -259,9 +307,10 @@ export class ListItemNode extends ElementNode {
     _: RangeSelection,
     restoreSelection = true,
   ): ListItemNode | ParagraphNode {
-    const newElement = $createListItemNode(
-      this.__checked == null ? undefined : false,
-    );
+    const newElement = $createListItemNode()
+      .updateFromJSON(this.exportJSON())
+      .setChecked(this.getChecked() ? false : undefined);
+
     this.insertAfter(newElement, restoreSelection);
 
     return newElement;
@@ -312,30 +361,40 @@ export class ListItemNode extends ElementNode {
     return self.__value;
   }
 
-  setValue(value: number): void {
+  setValue(value: number): this {
     const self = this.getWritable();
     self.__value = value;
+    return self;
   }
 
   getChecked(): boolean | undefined {
     const self = this.getLatest();
 
-    return self.__checked;
+    let listType: ListType | undefined;
+
+    const parent = this.getParent();
+    if ($isListNode(parent)) {
+      listType = parent.getListType();
+    }
+
+    return listType === 'check' ? Boolean(self.__checked) : undefined;
   }
 
-  setChecked(checked?: boolean): void {
+  setChecked(checked?: boolean): this {
     const self = this.getWritable();
     self.__checked = checked;
+    return self;
   }
 
-  toggleChecked(): void {
-    this.setChecked(!this.__checked);
+  toggleChecked(): this {
+    const self = this.getWritable();
+    return self.setChecked(!self.__checked);
   }
 
   getIndent(): number {
     // If we don't have a parent, we are likely serializing
     const parent = this.getParent();
-    if (parent === null) {
+    if (parent === null || !this.isAttached()) {
       return this.getLatest().__indent;
     }
     // ListItemNode should always have a ListNode for a parent.
@@ -350,10 +409,9 @@ export class ListItemNode extends ElementNode {
   }
 
   setIndent(indent: number): this {
-    invariant(
-      typeof indent === 'number' && indent > -1,
-      'Invalid indent value.',
-    );
+    invariant(typeof indent === 'number', 'Invalid indent value.');
+    indent = Math.floor(indent);
+    invariant(indent >= 0, 'Indent value must be non-negative.');
     let currentIndent = this.getIndent();
     while (currentIndent !== indent) {
       if (currentIndent < indent) {
@@ -379,7 +437,7 @@ export class ListItemNode extends ElementNode {
   }
 
   canMergeWith(node: LexicalNode): boolean {
-    return $isParagraphNode(node) || $isListItemNode(node);
+    return $isListItemNode(node) || $isParagraphNode(node);
   }
 
   extractWithChild(child: LexicalNode, selection: BaseSelection): boolean {
@@ -403,6 +461,10 @@ export class ListItemNode extends ElementNode {
 
   createParentElementNode(): ElementNode {
     return $createListNode('bullet');
+  }
+
+  canMergeWhenEmpty(): true {
+    return true;
   }
 }
 

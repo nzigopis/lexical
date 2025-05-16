@@ -7,6 +7,7 @@
  */
 
 import {
+  $createCodeHighlightNode,
   $createCodeNode,
   $isCodeHighlightNode,
   registerCodeHighlighting,
@@ -27,6 +28,7 @@ import {
   $isTabNode,
   $isTextNode,
   $setSelection,
+  HISTORY_MERGE_TAG,
   KEY_ARROW_DOWN_COMMAND,
   KEY_ARROW_UP_COMMAND,
   KEY_TAB_COMMAND,
@@ -108,7 +110,7 @@ describe('LexicalCodeNode tests', () => {
         // If you broke this test, you changed the public interface of a
         // serialized Lexical Core Node. Please ensure the correct adapter
         // logic is in place in the corresponding importJSON  method
-        // to accomodate these changes.import { moveSelectionPointToSibling } from '../../../../lexical/src/LexicalSelection';
+        // to accommodate these changes.import { moveSelectionPointToSibling } from '../../../../lexical/src/LexicalSelection';
 
         expect(node.exportJSON()).toStrictEqual({
           children: [],
@@ -855,6 +857,34 @@ describe('LexicalCodeNode tests', () => {
           );
         }
       }
+    });
+    describe('initial editor state before transforms', () => {
+      test('can be registered after initial editor state (regression #7014)', async () => {
+        const {editor} = testEnv;
+        await editor.update(
+          () => {
+            const root = $getRoot();
+            const codeBlock = $createCodeNode('javascript');
+            codeBlock.append(
+              $createCodeHighlightNode('const lexical = "awesome"'),
+            );
+            root.append(codeBlock);
+          },
+          {tag: HISTORY_MERGE_TAG},
+        );
+        // before transform
+        expect(testEnv.innerHTML).toBe(
+          '<code spellcheck="false" data-language="javascript" data-highlight-language="javascript" dir="ltr"><span data-lexical-text="true">const lexical = "awesome"</span></code>',
+        );
+        registerRichText(editor);
+        registerTabIndentation(editor);
+        registerCodeHighlighting(editor);
+        await Promise.resolve(undefined);
+        // after transforms
+        expect(testEnv.innerHTML).toBe(
+          '<code spellcheck="false" data-language="javascript" data-highlight-language="javascript" dir="ltr" data-gutter="1"><span data-lexical-text="true">const</span><span data-lexical-text="true"> lexical </span><span data-lexical-text="true">=</span><span data-lexical-text="true"> </span><span data-lexical-text="true">"awesome"</span></code>',
+        );
+      });
     });
   });
 });

@@ -67,6 +67,8 @@ const FORMAT_PREDICATES = [
     node.hasFormat('superscript') && 'Superscript',
   (node: TextNode | RangeSelection) =>
     node.hasFormat('underline') && 'Underline',
+  (node: TextNode | RangeSelection) =>
+    node.hasFormat('highlight') && 'Highlight',
 ];
 
 const FORMAT_PREDICATES_PARAGRAPH = [
@@ -78,6 +80,7 @@ const FORMAT_PREDICATES_PARAGRAPH = [
   (node: ParagraphNode) => node.hasTextFormat('subscript') && 'Subscript',
   (node: ParagraphNode) => node.hasTextFormat('superscript') && 'Superscript',
   (node: ParagraphNode) => node.hasTextFormat('underline') && 'Underline',
+  (node: ParagraphNode) => node.hasTextFormat('highlight') && 'Highlight',
 ];
 
 const DETAIL_PREDICATES = [
@@ -161,8 +164,8 @@ export function generateContent(
   } else {
     res += '\n  └ None dispatched.';
   }
-
-  res += '\n\n editor:';
+  const {version} = editor.constructor;
+  res += `\n\n editor${version ? ` (v${version})` : ''}:`;
   res += `\n  └ namespace ${editorConfig.namespace}`;
   if (compositionKey !== null) {
     res += `\n  └ compositionKey ${compositionKey}`;
@@ -284,7 +287,9 @@ function printNode(
     return `ids: [ ${node.getIDs().join(', ')} ]`;
   } else if ($isParagraphNode(node)) {
     const formatText = printTextFormatProperties(node);
-    return formatText !== '' ? `{ ${formatText} }` : '';
+    let paragraphData = formatText !== '' ? `{ ${formatText} }` : '';
+    paragraphData += node.__style ? `(${node.__style})` : '';
+    return paragraphData;
   } else {
     return '';
   }

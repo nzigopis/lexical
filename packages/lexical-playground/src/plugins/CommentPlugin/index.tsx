@@ -14,6 +14,7 @@ import type {
   NodeKey,
   RangeSelection,
 } from 'lexical';
+import type {JSX} from 'react';
 import type {Doc} from 'yjs';
 
 import './index.css';
@@ -45,14 +46,22 @@ import {
   $isRangeSelection,
   $isTextNode,
   CLEAR_EDITOR_COMMAND,
+  COLLABORATION_TAG,
   COMMAND_PRIORITY_EDITOR,
   createCommand,
+  getDOMSelection,
   KEY_ESCAPE_COMMAND,
 } from 'lexical';
-import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as React from 'react';
 import {createPortal} from 'react-dom';
-import useLayoutEffect from 'shared/useLayoutEffect';
 
 import {
   Comment,
@@ -466,7 +475,9 @@ function CommentsPanelListComment({
   rtf: Intl.RelativeTimeFormat;
   thread?: Thread;
 }): JSX.Element {
-  const seconds = Math.round((comment.timeStamp - performance.now()) / 1000);
+  const seconds = Math.round(
+    (comment.timeStamp - (performance.timeOrigin + performance.now())) / 1000,
+  );
   const minutes = Math.round(seconds / 60);
   const [modal, showModal] = useModal();
 
@@ -913,7 +924,7 @@ export default function CommentPlugin({
           if (!hasAnchorKey) {
             setActiveAnchorKey(null);
           }
-          if (!tags.has('collaboration') && $isRangeSelection(selection)) {
+          if (!tags.has(COLLABORATION_TAG) && $isRangeSelection(selection)) {
             setShowCommentInput(false);
           }
         });
@@ -921,7 +932,7 @@ export default function CommentPlugin({
       editor.registerCommand(
         INSERT_INLINE_COMMAND,
         () => {
-          const domSelection = window.getSelection();
+          const domSelection = getDOMSelection(editor._window);
           if (domSelection !== null) {
             domSelection.removeAllRanges();
           }

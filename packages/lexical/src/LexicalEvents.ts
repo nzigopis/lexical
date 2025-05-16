@@ -20,13 +20,14 @@ import {
   IS_SAFARI,
 } from 'shared/environment';
 import invariant from 'shared/invariant';
+import warnOnlyOnce from 'shared/warnOnlyOnce';
 
 import {
   $getPreviousSelection,
   $getRoot,
   $getSelection,
+  $isDecoratorNode,
   $isElementNode,
-  $isNodeSelection,
   $isRangeSelection,
   $isRootNode,
   $isTextNode,
@@ -60,7 +61,6 @@ import {
   KEY_TAB_COMMAND,
   MOVE_TO_END,
   MOVE_TO_START,
-  ParagraphNode,
   PASTE_COMMAND,
   REDO_COMMAND,
   REMOVE_TEXT_COMMAND,
@@ -70,8 +70,6 @@ import {
 import {KEY_MODIFIER_COMMAND, SELECT_ALL_COMMAND} from './LexicalCommands';
 import {
   COMPOSITION_START_CHAR,
-  DOM_ELEMENT_TYPE,
-  DOM_TEXT_TYPE,
   DOUBLE_LINE_BREAK,
   IS_ALL_FORMATTING,
 } from './LexicalConstants';
@@ -79,9 +77,11 @@ import {
   $internalCreateRangeSelection,
   RangeSelection,
 } from './LexicalSelection';
-import {getActiveEditor, updateEditor} from './LexicalUpdates';
+import {getActiveEditor, updateEditorSync} from './LexicalUpdates';
 import {
+  $findMatchingParent,
   $flushMutations,
+  $getAdjacentNode,
   $getNodeByKey,
   $isSelectionCapturedInDecorator,
   $isTokenOrSegmented,
@@ -90,10 +90,12 @@ import {
   $updateSelectedTextFromDOM,
   $updateTextNodeFromDOMContent,
   dispatchCommand,
-  doesContainGrapheme,
+  doesContainSurrogatePair,
   getAnchorTextFromDOM,
   getDOMSelection,
+  getDOMSelectionFromTarget,
   getDOMTextNode,
+  getEditorPropertyFromDOMNode,
   getEditorsToPropagate,
   getNearestEditorFromDOMNode,
   getWindow,
@@ -108,9 +110,13 @@ import {
   isDeleteLineForward,
   isDeleteWordBackward,
   isDeleteWordForward,
+  isDOMNode,
+  isDOMTextNode,
   isEscape,
   isFirefoxClipboardEvents,
+  isHTMLElement,
   isItalic,
+  isLexicalEditor,
   isLineBreak,
   isModifier,
   isMoveBackward,
@@ -173,6 +179,9 @@ let isSelectionChangeFromDOMUpdate = false;
 let isSelectionChangeFromMouseDown = false;
 let isInsertLineBreak = false;
 let isFirefoxEndingComposition = false;
+let isSafariEndingComposition = false;
+let safariEndCompositionEventData = '';
+let postDeleteSelectionToRestore: RangeSelection | null = null;
 let collapsedSelectionFormat: [number, string, number, NodeKey, number] = [
   0,
   '',
@@ -187,7 +196,6 @@ let collapsedSelectionFormat: [number, string, number, NodeKey, number] = [
 // work as intended between different browsers and across word, line and character
 // boundary/formats. It also is important for text replacement, node schemas and
 // composition mechanics.
-
 function $shouldPreventDefaultAndInsertText(
   selection: RangeSelection,
   domTargetRange: null | StaticRange,
@@ -199,7 +207,7 @@ function $shouldPreventDefaultAndInsertText(
   const focus = selection.focus;
   const anchorNode = anchor.getNode();
   const editor = getActiveEditor();
-  const domSelection = getDOMSelection(editor._window);
+  const domSelection = getDOMSelection(getWindow(editor));
   const domAnchorNode = domSelection !== null ? domSelection.anchorNode : null;
   const anchorKey = anchor.key;
   const backingAnchorElement = editor.getElementByKey(anchorKey);
@@ -218,7 +226,9 @@ function $shouldPreventDefaultAndInsertText(
         // a dangling `input` event caused by execCommand('insertText').
         lastBeforeInputInsertTextTimeStamp < timeStamp + 50)) ||
       (anchorNode.isDirty() && textLength < 2) ||
-      doesContainGrapheme(text)) &&
+      // TODO consider if there are other scenarios when multiple code units
+      //      should be addressed here
+      doesContainSurrogatePair(text)) &&
       anchor.offset !== focus.offset &&
       !anchorNode.isComposing()) ||
     // Any non standard text node.
@@ -252,9 +262,8 @@ function shouldSkipSelectionChange(
   offset: number,
 ): boolean {
   return (
-    domNode !== null &&
+    isDOMTextNode(domNode) &&
     domNode.nodeValue !== null &&
-    domNode.nodeType === DOM_TEXT_TYPE &&
     offset !== 0 &&
     offset !== domNode.nodeValue.length
   );
@@ -284,12 +293,13 @@ function onSelectionChange(
     // sibling instead.
     if (
       shouldSkipSelectionChange(anchorDOM, anchorOffset) &&
-      shouldSkipSelectionChange(focusDOM, focusOffset)
+      shouldSkipSelectionChange(focusDOM, focusOffset) &&
+      !postDeleteSelectionToRestore
     ) {
       return;
     }
   }
-  updateEditor(editor, () => {
+  updateEditorSync(editor, () => {
     // Non-active editor don't need any extra logic for selection, it only needs update
     // to reconcile selection (set it to null) to ensure that only one editor has non-null selection.
     if (!isActive) {
@@ -301,7 +311,30 @@ function onSelectionChange(
       return;
     }
 
-    const selection = $getSelection();
+    let selection = $getSelection();
+
+    // Restore selection in the event of incorrect rightward shift after deletion
+    if (
+      postDeleteSelectionToRestore &&
+      $isRangeSelection(selection) &&
+      selection.isCollapsed()
+    ) {
+      const curAnchor = selection.anchor;
+      const prevAnchor = postDeleteSelectionToRestore.anchor;
+      if (
+        // Rightward shift in same node
+        (curAnchor.key === prevAnchor.key &&
+          curAnchor.offset === prevAnchor.offset + 1) ||
+        // Or rightward shift into sibling node
+        (curAnchor.offset === 1 &&
+          prevAnchor.getNode().is(curAnchor.getNode().getPreviousSibling()))
+      ) {
+        // Restore selection
+        selection = postDeleteSelectionToRestore.clone();
+        $setSelection(selection);
+      }
+    }
+    postDeleteSelectionToRestore = null;
 
     // Update the selection format
     if ($isRangeSelection(selection)) {
@@ -336,27 +369,28 @@ function onSelectionChange(
           anchor.offset === lastOffset &&
           anchor.key === lastKey
         ) {
-          selection.format = lastFormat;
-          selection.style = lastStyle;
+          $updateSelectionFormatStyle(selection, lastFormat, lastStyle);
         } else {
           if (anchor.type === 'text') {
             invariant(
               $isTextNode(anchorNode),
               'Point.getNode() must return TextNode when type is text',
             );
-            selection.format = anchorNode.getFormat();
-            selection.style = anchorNode.getStyle();
+            $updateSelectionFormatStyleFromTextNode(selection, anchorNode);
           } else if (anchor.type === 'element' && !isRootTextContentEmpty) {
+            invariant(
+              $isElementNode(anchorNode),
+              'Point.getNode() must return ElementNode when type is element',
+            );
             const lastNode = anchor.getNode();
             if (
-              lastNode instanceof ParagraphNode &&
-              lastNode.getChildrenSize() === 0
+              // This previously applied to all ParagraphNode
+              lastNode.isEmpty()
             ) {
-              selection.format = lastNode.getTextFormat();
+              $updateSelectionFormatStyleFromElementNode(selection, lastNode);
             } else {
-              selection.format = 0;
+              $updateSelectionFormatStyle(selection, 0, '');
             }
-            selection.style = '';
           }
         }
       } else {
@@ -405,15 +439,45 @@ function onSelectionChange(
   });
 }
 
+function $updateSelectionFormatStyle(
+  selection: RangeSelection,
+  format: number,
+  style: string,
+) {
+  if (selection.format !== format || selection.style !== style) {
+    selection.format = format;
+    selection.style = style;
+    selection.dirty = true;
+  }
+}
+
+function $updateSelectionFormatStyleFromTextNode(
+  selection: RangeSelection,
+  node: TextNode,
+) {
+  const format = node.getFormat();
+  const style = node.getStyle();
+  $updateSelectionFormatStyle(selection, format, style);
+}
+
+function $updateSelectionFormatStyleFromElementNode(
+  selection: RangeSelection,
+  node: ElementNode,
+) {
+  const format = node.getTextFormat();
+  const style = node.getTextStyle();
+  $updateSelectionFormatStyle(selection, format, style);
+}
+
 // This is a work-around is mainly Chrome specific bug where if you select
 // the contents of an empty block, you cannot easily unselect anything.
 // This results in a tiny selection box that looks buggy/broken. This can
 // also help other browsers when selection might "appear" lost, when it
 // really isn't.
 function onClick(event: PointerEvent, editor: LexicalEditor): void {
-  updateEditor(editor, () => {
+  updateEditorSync(editor, () => {
     const selection = $getSelection();
-    const domSelection = getDOMSelection(editor._window);
+    const domSelection = getDOMSelection(getWindow(editor));
     const lastSelection = $getPreviousSelection();
 
     if (domSelection) {
@@ -434,17 +498,19 @@ function onClick(event: PointerEvent, editor: LexicalEditor): void {
           domSelection.removeAllRanges();
           selection.dirty = true;
         } else if (event.detail === 3 && !selection.isCollapsed()) {
-          // Tripple click causing selection to overflow into the nearest element. In that
+          // Triple click causing selection to overflow into the nearest element. In that
           // case visually it looks like a single element content is selected, focus node
           // is actually at the beginning of the next element (if present) and any manipulations
           // with selection (formatting) are affecting second element as well
           const focus = selection.focus;
           const focusNode = focus.getNode();
           if (anchorNode !== focusNode) {
-            if ($isElementNode(anchorNode)) {
-              anchorNode.select(0);
-            } else {
-              anchorNode.getParentOrThrow().select(0);
+            const parentNode = $findMatchingParent(
+              anchorNode,
+              (node) => $isElementNode(node) && !node.isInline(),
+            );
+            if ($isElementNode(parentNode)) {
+              parentNode.select(0);
             }
           }
         }
@@ -452,21 +518,18 @@ function onClick(event: PointerEvent, editor: LexicalEditor): void {
         // This is used to update the selection on touch devices when the user clicks on text after a
         // node selection. See isSelectionChangeFromMouseDown for the inverse
         const domAnchorNode = domSelection.anchorNode;
-        if (domAnchorNode !== null) {
-          const nodeType = domAnchorNode.nodeType;
-          // If the user is attempting to click selection back onto text, then
-          // we should attempt create a range selection.
-          // When we click on an empty paragraph node or the end of a paragraph that ends
-          // with an image/poll, the nodeType will be ELEMENT_NODE
-          if (nodeType === DOM_ELEMENT_TYPE || nodeType === DOM_TEXT_TYPE) {
-            const newSelection = $internalCreateRangeSelection(
-              lastSelection,
-              domSelection,
-              editor,
-              event,
-            );
-            $setSelection(newSelection);
-          }
+        // If the user is attempting to click selection back onto text, then
+        // we should attempt create a range selection.
+        // When we click on an empty paragraph node or the end of a paragraph that ends
+        // with an image/poll, the nodeType will be ELEMENT_NODE
+        if (isHTMLElement(domAnchorNode) || isDOMTextNode(domAnchorNode)) {
+          const newSelection = $internalCreateRangeSelection(
+            lastSelection,
+            domSelection,
+            editor,
+            event,
+          );
+          $setSelection(newSelection);
         }
       }
     }
@@ -479,8 +542,8 @@ function onPointerDown(event: PointerEvent, editor: LexicalEditor) {
   // TODO implement text drag & drop
   const target = event.target;
   const pointerType = event.pointerType;
-  if (target instanceof Node && pointerType !== 'touch') {
-    updateEditor(editor, () => {
+  if (isDOMNode(target) && pointerType !== 'touch' && event.button === 0) {
+    updateEditorSync(editor, () => {
       // Drag & drop should not recompute selection until mouse up; otherwise the initially
       // selected content is lost.
       if (!$isSelectionCapturedInDecorator(target)) {
@@ -540,7 +603,7 @@ function onBeforeInput(event: InputEvent, editor: LexicalEditor): void {
     return;
   }
 
-  updateEditor(editor, () => {
+  updateEditorSync(editor, () => {
     const selection = $getSelection();
 
     if (inputType === 'deleteContentBackward') {
@@ -568,19 +631,18 @@ function onBeforeInput(event: InputEvent, editor: LexicalEditor): void {
           lastKeyDownTimeStamp = 0;
           // Fixes an Android bug where selection flickers when backspacing
           setTimeout(() => {
-            updateEditor(editor, () => {
+            updateEditorSync(editor, () => {
               $setCompositionKey(null);
             });
           }, ANDROID_COMPOSITION_LATENCY);
           if ($isRangeSelection(selection)) {
             const anchorNode = selection.anchor.getNode();
             anchorNode.markDirty();
-            selection.format = anchorNode.getFormat();
             invariant(
               $isTextNode(anchorNode),
               'Anchor node must be a TextNode',
             );
-            selection.style = anchorNode.getStyle();
+            $updateSelectionFormatStyleFromTextNode(selection, anchorNode);
           }
         } else {
           $setCompositionKey(null);
@@ -588,16 +650,41 @@ function onBeforeInput(event: InputEvent, editor: LexicalEditor): void {
           // Chromium Android at the moment seems to ignore the preventDefault
           // on 'deleteContentBackward' and still deletes the content. Which leads
           // to multiple deletions. So we let the browser handle the deletion in this case.
-          const selectedNodeText = selection.anchor.getNode().getTextContent();
+          const selectedNode = selection.anchor.getNode();
+          const selectedNodeText = selectedNode.getTextContent();
+          // When the target node has `canInsertTextAfter` set to false, the first deletion
+          // doesn't have an effect, so we need to handle it with Lexical.
+          const selectedNodeCanInsertTextAfter =
+            selectedNode.canInsertTextAfter();
           const hasSelectedAllTextInNode =
             selection.anchor.offset === 0 &&
             selection.focus.offset === selectedNodeText.length;
-          const shouldLetBrowserHandleDelete =
+          let shouldLetBrowserHandleDelete =
             IS_ANDROID_CHROME &&
             isSelectionAnchorSameAsFocus &&
-            !hasSelectedAllTextInNode;
+            !hasSelectedAllTextInNode &&
+            selectedNodeCanInsertTextAfter;
+          // Check if selection is collapsed and if the previous node is a decorator node
+          // If so, the browser will not be able to handle the deletion
+          if (shouldLetBrowserHandleDelete && selection.isCollapsed()) {
+            shouldLetBrowserHandleDelete = !$isDecoratorNode(
+              $getAdjacentNode(selection.anchor, true),
+            );
+          }
           if (!shouldLetBrowserHandleDelete) {
             dispatchCommand(editor, DELETE_CHARACTER_COMMAND, true);
+            // When deleting across paragraphs, Chrome on Android incorrectly shifts the selection rightwards
+            // We save the correct selection to restore later during handling of selectionchange event
+            const selectionAfterDelete = $getSelection();
+            if (
+              IS_ANDROID_CHROME &&
+              $isRangeSelection(selectionAfterDelete) &&
+              selectionAfterDelete.isCollapsed()
+            ) {
+              postDeleteSelectionToRestore = selectionAfterDelete;
+              // Cleanup in case selectionchange does not fire
+              setTimeout(() => (postDeleteSelectionToRestore = null));
+            }
           }
         }
         return;
@@ -798,93 +885,110 @@ function onBeforeInput(event: InputEvent, editor: LexicalEditor): void {
 }
 
 function onInput(event: InputEvent, editor: LexicalEditor): void {
+  // Note that the MutationObserver may or may not have already fired,
+  // but the the DOM and selection may have already changed.
+  // See also:
+  // - https://github.com/facebook/lexical/issues/7028
+  // - https://github.com/facebook/lexical/pull/794
+
   // We don't want the onInput to bubble, in the case of nested editors.
   event.stopPropagation();
-  updateEditor(editor, () => {
-    const selection = $getSelection();
-    const data = event.data;
-    const targetRange = getTargetRange(event);
-
-    if (
-      data != null &&
-      $isRangeSelection(selection) &&
-      $shouldPreventDefaultAndInsertText(
-        selection,
-        targetRange,
-        data,
-        event.timeStamp,
-        false,
-      )
-    ) {
-      // Given we're over-riding the default behavior, we will need
-      // to ensure to disable composition before dispatching the
-      // insertText command for when changing the sequence for FF.
-      if (isFirefoxEndingComposition) {
-        $onCompositionEndImpl(editor, data);
-        isFirefoxEndingComposition = false;
-      }
-      const anchor = selection.anchor;
-      const anchorNode = anchor.getNode();
-      const domSelection = getDOMSelection(editor._window);
-      if (domSelection === null) {
+  updateEditorSync(
+    editor,
+    () => {
+      if (
+        isHTMLElement(event.target) &&
+        $isSelectionCapturedInDecorator(event.target)
+      ) {
         return;
       }
-      const isBackward = selection.isBackward();
-      const startOffset = isBackward
-        ? selection.anchor.offset
-        : selection.focus.offset;
-      const endOffset = isBackward
-        ? selection.focus.offset
-        : selection.anchor.offset;
-      // If the content is the same as inserted, then don't dispatch an insertion.
-      // Given onInput doesn't take the current selection (it uses the previous)
-      // we can compare that against what the DOM currently says.
+
+      const selection = $getSelection();
+      const data = event.data;
+      const targetRange = getTargetRange(event);
+
       if (
-        !CAN_USE_BEFORE_INPUT ||
-        selection.isCollapsed() ||
-        !$isTextNode(anchorNode) ||
-        domSelection.anchorNode === null ||
-        anchorNode.getTextContent().slice(0, startOffset) +
-          data +
-          anchorNode.getTextContent().slice(startOffset + endOffset) !==
-          getAnchorTextFromDOM(domSelection.anchorNode)
+        data != null &&
+        $isRangeSelection(selection) &&
+        $shouldPreventDefaultAndInsertText(
+          selection,
+          targetRange,
+          data,
+          event.timeStamp,
+          false,
+        )
       ) {
-        dispatchCommand(editor, CONTROLLED_TEXT_INSERTION_COMMAND, data);
+        // Given we're over-riding the default behavior, we will need
+        // to ensure to disable composition before dispatching the
+        // insertText command for when changing the sequence for FF.
+        if (isFirefoxEndingComposition) {
+          $onCompositionEndImpl(editor, data);
+          isFirefoxEndingComposition = false;
+        }
+        const anchor = selection.anchor;
+        const anchorNode = anchor.getNode();
+        const domSelection = getDOMSelection(getWindow(editor));
+        if (domSelection === null) {
+          return;
+        }
+        const isBackward = selection.isBackward();
+        const startOffset = isBackward
+          ? selection.anchor.offset
+          : selection.focus.offset;
+        const endOffset = isBackward
+          ? selection.focus.offset
+          : selection.anchor.offset;
+        // If the content is the same as inserted, then don't dispatch an insertion.
+        // Given onInput doesn't take the current selection (it uses the previous)
+        // we can compare that against what the DOM currently says.
+        if (
+          !CAN_USE_BEFORE_INPUT ||
+          selection.isCollapsed() ||
+          !$isTextNode(anchorNode) ||
+          domSelection.anchorNode === null ||
+          anchorNode.getTextContent().slice(0, startOffset) +
+            data +
+            anchorNode.getTextContent().slice(startOffset + endOffset) !==
+            getAnchorTextFromDOM(domSelection.anchorNode)
+        ) {
+          dispatchCommand(editor, CONTROLLED_TEXT_INSERTION_COMMAND, data);
+        }
+
+        const textLength = data.length;
+
+        // Another hack for FF, as it's possible that the IME is still
+        // open, even though compositionend has already fired (sigh).
+        if (
+          IS_FIREFOX &&
+          textLength > 1 &&
+          event.inputType === 'insertCompositionText' &&
+          !editor.isComposing()
+        ) {
+          selection.anchor.offset -= textLength;
+        }
+
+        // This ensures consistency on Android.
+        if (!IS_SAFARI && !IS_IOS && !IS_APPLE_WEBKIT && editor.isComposing()) {
+          lastKeyDownTimeStamp = 0;
+          $setCompositionKey(null);
+        }
+      } else {
+        const characterData = data !== null ? data : undefined;
+        $updateSelectedTextFromDOM(false, editor, characterData);
+
+        // onInput always fires after onCompositionEnd for FF.
+        if (isFirefoxEndingComposition) {
+          $onCompositionEndImpl(editor, data || undefined);
+          isFirefoxEndingComposition = false;
+        }
       }
 
-      const textLength = data.length;
-
-      // Another hack for FF, as it's possible that the IME is still
-      // open, even though compositionend has already fired (sigh).
-      if (
-        IS_FIREFOX &&
-        textLength > 1 &&
-        event.inputType === 'insertCompositionText' &&
-        !editor.isComposing()
-      ) {
-        selection.anchor.offset -= textLength;
-      }
-
-      // This ensures consistency on Android.
-      if (!IS_SAFARI && !IS_IOS && !IS_APPLE_WEBKIT && editor.isComposing()) {
-        lastKeyDownTimeStamp = 0;
-        $setCompositionKey(null);
-      }
-    } else {
-      const characterData = data !== null ? data : undefined;
-      $updateSelectedTextFromDOM(false, editor, characterData);
-
-      // onInput always fires after onCompositionEnd for FF.
-      if (isFirefoxEndingComposition) {
-        $onCompositionEndImpl(editor, data || undefined);
-        isFirefoxEndingComposition = false;
-      }
-    }
-
-    // Also flush any other mutations that might have occurred
-    // since the change.
-    $flushMutations();
-  });
+      // Also flush any other mutations that might have occurred
+      // since the change.
+      $flushMutations();
+    },
+    {event},
+  );
   unprocessedBeforeInputData = null;
 }
 
@@ -892,7 +996,7 @@ function onCompositionStart(
   event: CompositionEvent,
   editor: LexicalEditor,
 ): void {
-  updateEditor(editor, () => {
+  updateEditorSync(editor, () => {
     const selection = $getSelection();
 
     if ($isRangeSelection(selection) && !editor.isComposing()) {
@@ -985,8 +1089,16 @@ function onCompositionEnd(
   // the logic in onInput.
   if (IS_FIREFOX) {
     isFirefoxEndingComposition = true;
+  } else if (!IS_IOS && (IS_SAFARI || IS_APPLE_WEBKIT)) {
+    // Fix：https://github.com/facebook/lexical/pull/7061
+    // In safari, onCompositionEnd triggers before keydown
+    // This will cause an extra character to be deleted when exiting the IME
+    // Therefore, a flag is used to mark that the keydown event is triggered after onCompositionEnd
+    // Ensure that an extra character is not deleted due to the backspace event being triggered in the keydown event.
+    isSafariEndingComposition = true;
+    safariEndCompositionEventData = event.data;
   } else {
-    updateEditor(editor, () => {
+    updateEditorSync(editor, () => {
       $onCompositionEndImpl(editor, event.data);
     });
   }
@@ -999,106 +1111,112 @@ function onKeyDown(event: KeyboardEvent, editor: LexicalEditor): void {
     return;
   }
 
-  const {key, shiftKey, ctrlKey, metaKey, altKey} = event;
-
   if (dispatchCommand(editor, KEY_DOWN_COMMAND, event)) {
     return;
   }
 
-  if (key == null) {
+  if (event.key == null) {
+    return;
+  }
+  if (isSafariEndingComposition && isBackspace(event)) {
+    updateEditorSync(editor, () => {
+      $onCompositionEndImpl(editor, safariEndCompositionEventData);
+    });
+    isSafariEndingComposition = false;
+    safariEndCompositionEventData = '';
     return;
   }
 
-  if (isMoveForward(key, ctrlKey, altKey, metaKey)) {
+  if (isMoveForward(event)) {
     dispatchCommand(editor, KEY_ARROW_RIGHT_COMMAND, event);
-  } else if (isMoveToEnd(key, ctrlKey, shiftKey, altKey, metaKey)) {
+  } else if (isMoveToEnd(event)) {
     dispatchCommand(editor, MOVE_TO_END, event);
-  } else if (isMoveBackward(key, ctrlKey, altKey, metaKey)) {
+  } else if (isMoveBackward(event)) {
     dispatchCommand(editor, KEY_ARROW_LEFT_COMMAND, event);
-  } else if (isMoveToStart(key, ctrlKey, shiftKey, altKey, metaKey)) {
+  } else if (isMoveToStart(event)) {
     dispatchCommand(editor, MOVE_TO_START, event);
-  } else if (isMoveUp(key, ctrlKey, metaKey)) {
+  } else if (isMoveUp(event)) {
     dispatchCommand(editor, KEY_ARROW_UP_COMMAND, event);
-  } else if (isMoveDown(key, ctrlKey, metaKey)) {
+  } else if (isMoveDown(event)) {
     dispatchCommand(editor, KEY_ARROW_DOWN_COMMAND, event);
-  } else if (isLineBreak(key, shiftKey)) {
+  } else if (isLineBreak(event)) {
     isInsertLineBreak = true;
     dispatchCommand(editor, KEY_ENTER_COMMAND, event);
-  } else if (isSpace(key)) {
+  } else if (isSpace(event)) {
     dispatchCommand(editor, KEY_SPACE_COMMAND, event);
-  } else if (isOpenLineBreak(key, ctrlKey)) {
+  } else if (isOpenLineBreak(event)) {
     event.preventDefault();
     isInsertLineBreak = true;
     dispatchCommand(editor, INSERT_LINE_BREAK_COMMAND, true);
-  } else if (isParagraph(key, shiftKey)) {
+  } else if (isParagraph(event)) {
     isInsertLineBreak = false;
     dispatchCommand(editor, KEY_ENTER_COMMAND, event);
-  } else if (isDeleteBackward(key, altKey, metaKey, ctrlKey)) {
-    if (isBackspace(key)) {
+  } else if (isDeleteBackward(event)) {
+    if (isBackspace(event)) {
       dispatchCommand(editor, KEY_BACKSPACE_COMMAND, event);
     } else {
       event.preventDefault();
       dispatchCommand(editor, DELETE_CHARACTER_COMMAND, true);
     }
-  } else if (isEscape(key)) {
+  } else if (isEscape(event)) {
     dispatchCommand(editor, KEY_ESCAPE_COMMAND, event);
-  } else if (isDeleteForward(key, ctrlKey, shiftKey, altKey, metaKey)) {
-    if (isDelete(key)) {
+  } else if (isDeleteForward(event)) {
+    if (isDelete(event)) {
       dispatchCommand(editor, KEY_DELETE_COMMAND, event);
     } else {
       event.preventDefault();
       dispatchCommand(editor, DELETE_CHARACTER_COMMAND, false);
     }
-  } else if (isDeleteWordBackward(key, altKey, ctrlKey)) {
+  } else if (isDeleteWordBackward(event)) {
     event.preventDefault();
     dispatchCommand(editor, DELETE_WORD_COMMAND, true);
-  } else if (isDeleteWordForward(key, altKey, ctrlKey)) {
+  } else if (isDeleteWordForward(event)) {
     event.preventDefault();
     dispatchCommand(editor, DELETE_WORD_COMMAND, false);
-  } else if (isDeleteLineBackward(key, metaKey)) {
+  } else if (isDeleteLineBackward(event)) {
     event.preventDefault();
     dispatchCommand(editor, DELETE_LINE_COMMAND, true);
-  } else if (isDeleteLineForward(key, metaKey)) {
+  } else if (isDeleteLineForward(event)) {
     event.preventDefault();
     dispatchCommand(editor, DELETE_LINE_COMMAND, false);
-  } else if (isBold(key, altKey, metaKey, ctrlKey)) {
+  } else if (isBold(event)) {
     event.preventDefault();
     dispatchCommand(editor, FORMAT_TEXT_COMMAND, 'bold');
-  } else if (isUnderline(key, altKey, metaKey, ctrlKey)) {
+  } else if (isUnderline(event)) {
     event.preventDefault();
     dispatchCommand(editor, FORMAT_TEXT_COMMAND, 'underline');
-  } else if (isItalic(key, altKey, metaKey, ctrlKey)) {
+  } else if (isItalic(event)) {
     event.preventDefault();
     dispatchCommand(editor, FORMAT_TEXT_COMMAND, 'italic');
-  } else if (isTab(key, altKey, ctrlKey, metaKey)) {
+  } else if (isTab(event)) {
     dispatchCommand(editor, KEY_TAB_COMMAND, event);
-  } else if (isUndo(key, shiftKey, metaKey, ctrlKey)) {
+  } else if (isUndo(event)) {
     event.preventDefault();
     dispatchCommand(editor, UNDO_COMMAND, undefined);
-  } else if (isRedo(key, shiftKey, metaKey, ctrlKey)) {
+  } else if (isRedo(event)) {
     event.preventDefault();
     dispatchCommand(editor, REDO_COMMAND, undefined);
   } else {
     const prevSelection = editor._editorState._selection;
-    if ($isNodeSelection(prevSelection)) {
-      if (isCopy(key, shiftKey, metaKey, ctrlKey)) {
+    if (prevSelection !== null && !$isRangeSelection(prevSelection)) {
+      // Only RangeSelection can use the native cut/copy/select all
+      if (isCopy(event)) {
         event.preventDefault();
         dispatchCommand(editor, COPY_COMMAND, event);
-      } else if (isCut(key, shiftKey, metaKey, ctrlKey)) {
+      } else if (isCut(event)) {
         event.preventDefault();
         dispatchCommand(editor, CUT_COMMAND, event);
-      } else if (isSelectAll(key, metaKey, ctrlKey)) {
+      } else if (isSelectAll(event)) {
         event.preventDefault();
         dispatchCommand(editor, SELECT_ALL_COMMAND, event);
       }
-      // FF does it well (no need to override behavior)
-    } else if (!IS_FIREFOX && isSelectAll(key, metaKey, ctrlKey)) {
+    } else if (!IS_FIREFOX && isSelectAll(event)) {
       event.preventDefault();
       dispatchCommand(editor, SELECT_ALL_COMMAND, event);
     }
   }
 
-  if (isModifier(ctrlKey, shiftKey, altKey, metaKey)) {
+  if (isModifier(event)) {
     dispatchCommand(editor, KEY_MODIFIER_COMMAND, event);
   }
 }
@@ -1123,14 +1241,7 @@ function getRootElementRemoveHandles(
 const activeNestedEditorsMap: Map<string, LexicalEditor> = new Map();
 
 function onDocumentSelectionChange(event: Event): void {
-  const target = event.target as null | Element | Document;
-  const targetWindow =
-    target == null
-      ? null
-      : target.nodeType === 9
-      ? (target as Document).defaultView
-      : (target as Element).ownerDocument.defaultView;
-  const domSelection = getDOMSelection(targetWindow);
+  const domSelection = getDOMSelectionFromTarget(event.target);
   if (domSelection === null) {
     return;
   }
@@ -1141,27 +1252,22 @@ function onDocumentSelectionChange(event: Event): void {
 
   if (isSelectionChangeFromMouseDown) {
     isSelectionChangeFromMouseDown = false;
-    updateEditor(nextActiveEditor, () => {
+    updateEditorSync(nextActiveEditor, () => {
       const lastSelection = $getPreviousSelection();
       const domAnchorNode = domSelection.anchorNode;
-      if (domAnchorNode === null) {
-        return;
+      if (isHTMLElement(domAnchorNode) || isDOMTextNode(domAnchorNode)) {
+        // If the user is attempting to click selection back onto text, then
+        // we should attempt create a range selection.
+        // When we click on an empty paragraph node or the end of a paragraph that ends
+        // with an image/poll, the nodeType will be ELEMENT_NODE
+        const newSelection = $internalCreateRangeSelection(
+          lastSelection,
+          domSelection,
+          nextActiveEditor,
+          event,
+        );
+        $setSelection(newSelection);
       }
-      const nodeType = domAnchorNode.nodeType;
-      // If the user is attempting to click selection back onto text, then
-      // we should attempt create a range selection.
-      // When we click on an empty paragraph node or the end of a paragraph that ends
-      // with an image/poll, the nodeType will be ELEMENT_NODE
-      if (nodeType !== DOM_ELEMENT_TYPE && nodeType !== DOM_TEXT_TYPE) {
-        return;
-      }
-      const newSelection = $internalCreateRangeSelection(
-        lastSelection,
-        domSelection,
-        nextActiveEditor,
-        event,
-      );
-      $setSelection(newSelection);
     });
   }
 
@@ -1311,13 +1417,18 @@ export function addRootElementEvents(
   }
 }
 
+const rootElementNotRegisteredWarning = warnOnlyOnce(
+  'Root element not registered',
+);
+
 export function removeRootElementEvents(rootElement: HTMLElement): void {
   const doc = rootElement.ownerDocument;
   const documentRootElementsCount = rootElementsRegistered.get(doc);
-  invariant(
-    documentRootElementsCount !== undefined,
-    'Root element not registered',
-  );
+  if (documentRootElementsCount === undefined) {
+    // This can happen if setRootElement() failed
+    rootElementNotRegisteredWarning();
+    return;
+  }
 
   // We only want to have a single global selectionchange event handler, shared
   // between all editor instances.
@@ -1328,13 +1439,17 @@ export function removeRootElementEvents(rootElement: HTMLElement): void {
     doc.removeEventListener('selectionchange', onDocumentSelectionChange);
   }
 
-  // @ts-expect-error: internal field
-  const editor: LexicalEditor | null | undefined = rootElement.__lexicalEditor;
+  const editor = getEditorPropertyFromDOMNode(rootElement);
 
-  if (editor !== null && editor !== undefined) {
+  if (isLexicalEditor(editor)) {
     cleanActiveNestedEditorsMap(editor);
     // @ts-expect-error: internal field
     rootElement.__lexicalEditor = null;
+  } else if (editor) {
+    invariant(
+      false,
+      'Attempted to remove event handlers from a node that does not belong to this build of Lexical',
+    );
   }
 
   const removeHandles = getRootElementRemoveHandles(rootElement);

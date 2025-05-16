@@ -38,6 +38,7 @@ import {
   KEY_DELETE_COMMAND,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
+  PASTE_TAG,
   REMOVE_TEXT_COMMAND,
   SELECT_ALL_COMMAND,
 } from 'lexical';
@@ -56,7 +57,7 @@ function onCopyForPlainText(
     if (event !== null) {
       const clipboardData = objectKlassEquals(event, KeyboardEvent)
         ? null
-        : (event as ClipboardEvent).clipboardData;
+        : event.clipboardData;
       const selection = $getSelection();
 
       if (selection !== null && clipboardData != null) {
@@ -81,13 +82,15 @@ function onPasteForPlainText(
   editor.update(
     () => {
       const selection = $getSelection();
-      const {clipboardData} = event as ClipboardEvent;
+      const clipboardData = objectKlassEquals(event, ClipboardEvent)
+        ? event.clipboardData
+        : null;
       if (clipboardData != null && $isRangeSelection(selection)) {
         $insertDataTransferForPlainText(clipboardData, selection);
       }
     },
     {
-      tag: 'paste',
+      tag: PASTE_TAG,
     },
   );
 }
@@ -271,6 +274,12 @@ export function registerPlainText(editor: LexicalEditor): () => void {
         const selection = $getSelection();
 
         if (!$isRangeSelection(selection)) {
+          return false;
+        }
+
+        // Exception handling for iOS native behavior instead of Lexical's behavior when using Korean on iOS devices.
+        // more details - https://github.com/facebook/lexical/issues/5841
+        if (IS_IOS && navigator.language === 'ko-KR') {
           return false;
         }
 

@@ -18,6 +18,7 @@ import {$createHeadingNode} from '@lexical/rich-text';
 import {
   $addNodeStyle,
   $getSelectionStyleValueForProperty,
+  $patchStyleText,
   $setBlocksType,
 } from '@lexical/selection';
 import {$createTableNodeWithDimensions} from '@lexical/table';
@@ -30,6 +31,7 @@ import {
   $getSelection,
   $isElementNode,
   $isRangeSelection,
+  $isTextNode,
   $setSelection,
   DecoratorNode,
   ElementNode,
@@ -236,39 +238,6 @@ describe('LexicalSelection tests', () => {
     );
     expect(actualSelection.focusOffset).toBe(expectedSelection.focusOffset);
   }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const GRAPHEME_SCENARIOS = [
-    {
-      description: 'grapheme cluster',
-      // Hangul grapheme cluster.
-      // https://www.compart.com/en/unicode/U+AC01
-      grapheme: '\u1100\u1161\u11A8',
-    },
-    {
-      description: 'extended grapheme cluster',
-      // Tamil 'ni' grapheme cluster.
-      // http://unicode.org/reports/tr29/#Table_Sample_Grapheme_Clusters
-      grapheme: '\u0BA8\u0BBF',
-    },
-    {
-      description: 'tailored grapheme cluster',
-      // Devangari 'kshi' tailored grapheme cluster.
-      // http://unicode.org/reports/tr29/#Table_Sample_Grapheme_Clusters
-      grapheme: '\u0915\u094D\u0937\u093F',
-    },
-    {
-      description: 'Emoji sequence combined using zero-width joiners',
-      // https://emojipedia.org/family-woman-woman-girl-boy/
-      grapheme:
-        '\uD83D\uDC69\u200D\uD83D\uDC69\u200D\uD83D\uDC67\u200D\uD83D\uDC66',
-    },
-    {
-      description: 'Emoji sequence with skin-tone modifier',
-      // https://emojipedia.org/clapping-hands-medium-skin-tone/
-      grapheme: '\uD83D\uDC4F\uD83C\uDFFD',
-    },
-  ];
 
   const suite = [
     {
@@ -733,64 +702,6 @@ describe('LexicalSelection tests', () => {
     },
 
     // Tests need fixing:
-    // ...GRAPHEME_SCENARIOS.flatMap(({description, grapheme}) => [
-    //   {
-    //     name: `Delete backward eliminates entire ${description} (${grapheme})`,
-    //     inputs: [insertText(grapheme + grapheme), deleteBackward(1)],
-    //     expectedHTML: `<div contenteditable="true" style="user-select: text; white-space: pre-wrap; word-break: break-word;" data-lexical-editor="true"><p dir=\"ltr\"><span>${grapheme}</span></p></div>`,
-    //     expectedSelection: {
-    //       anchorPath: [0, 0, 0],
-    //       anchorOffset: grapheme.length,
-    //       focusPath: [0, 0, 0],
-    //       focusOffset: grapheme.length,
-    //     },
-    //     setup: emptySetup,
-    //   },
-    //   {
-    //     name: `Delete forward eliminates entire ${description} (${grapheme})`,
-    //     inputs: [
-    //       insertText(grapheme + grapheme),
-    //       moveNativeSelection([0, 0, 0], 0, [0, 0, 0], 0),
-    //       deleteForward(),
-    //     ],
-    //     expectedHTML: `<div contenteditable="true" style="user-select: text; white-space: pre-wrap; word-break: break-word;" data-lexical-editor="true"><p dir=\"ltr\"><span>${grapheme}</span></p></div>`,
-    //     expectedSelection: {
-    //       anchorPath: [0, 0, 0],
-    //       anchorOffset: 0,
-    //       focusPath: [0, 0, 0],
-    //       focusOffset: 0,
-    //     },
-    //     setup: emptySetup,
-    //   },
-    //   {
-    //     name: `Move backward skips over grapheme cluster (${grapheme})`,
-    //     inputs: [insertText(grapheme + grapheme), moveBackward(1)],
-    //     expectedHTML: `<div contenteditable="true" style="user-select: text; white-space: pre-wrap; word-break: break-word;" data-lexical-editor="true"><p dir=\"ltr\"><span>${grapheme}${grapheme}</span></p></div>`,
-    //     expectedSelection: {
-    //       anchorPath: [0, 0, 0],
-    //       anchorOffset: grapheme.length,
-    //       focusPath: [0, 0, 0],
-    //       focusOffset: grapheme.length,
-    //     },
-    //     setup: emptySetup,
-    //   },
-    //   {
-    //     name: `Move forward skips over grapheme cluster (${grapheme})`,
-    //     inputs: [
-    //       insertText(grapheme + grapheme),
-    //       moveNativeSelection([0, 0, 0], 0, [0, 0, 0], 0),
-    //       moveForward(),
-    //     ],
-    //     expectedHTML: `<div contenteditable="true" style="user-select: text; white-space: pre-wrap; word-break: break-word;" data-lexical-editor="true"><p dir=\"ltr\"><span>${grapheme}${grapheme}</span></p></div>`,
-    //     expectedSelection: {
-    //       anchorPath: [0, 0, 0],
-    //       anchorOffset: grapheme.length,
-    //       focusPath: [0, 0, 0],
-    //       focusOffset: grapheme.length,
-    //     },
-    //     setup: emptySetup,
-    //   },
-    // ]),
     // {
     //   name: 'Jump to beginning and insert',
     //   inputs: [
@@ -1288,7 +1199,8 @@ describe('LexicalSelection tests', () => {
         paragraph.append(elementNode);
         elementNode.append(text);
 
-        const selectedNodes = $getSelection()!.getNodes();
+        const selection = $getSelection()!;
+        const selectedNodes = selection.getNodes();
 
         expect(selectedNodes.length).toBe(1);
         expect(selectedNodes[0].getKey()).toBe(text.getKey());
@@ -2272,42 +2184,44 @@ describe('LexicalSelection tests', () => {
     it('adjust offset for inline elements text formatting', async () => {
       await init();
 
-      await editor!.update(() => {
-        const root = $getRoot();
+      await ReactTestUtils.act(async () => {
+        await editor!.update(() => {
+          const root = $getRoot();
 
-        const text1 = $createTextNode('--');
-        const text2 = $createTextNode('abc');
-        const text3 = $createTextNode('--');
+          const text1 = $createTextNode('--');
+          const text2 = $createTextNode('abc');
+          const text3 = $createTextNode('--');
 
-        root.append(
-          $createParagraphNode().append(
-            text1,
-            $createLinkNode('https://lexical.dev').append(text2),
-            text3,
-          ),
-        );
+          root.append(
+            $createParagraphNode().append(
+              text1,
+              $createLinkNode('https://lexical.dev').append(text2),
+              text3,
+            ),
+          );
 
-        $setAnchorPoint({
-          key: text1.getKey(),
-          offset: 2,
-          type: 'text',
+          $setAnchorPoint({
+            key: text1.getKey(),
+            offset: 2,
+            type: 'text',
+          });
+
+          $setFocusPoint({
+            key: text3.getKey(),
+            offset: 0,
+            type: 'text',
+          });
+
+          const selection = $getSelection();
+
+          if (!$isRangeSelection(selection)) {
+            return;
+          }
+
+          selection.formatText('bold');
+
+          expect(text2.hasFormat('bold')).toBe(true);
         });
-
-        $setFocusPoint({
-          key: text3.getKey(),
-          offset: 0,
-          type: 'text',
-        });
-
-        const selection = $getSelection();
-
-        if (!$isRangeSelection(selection)) {
-          return;
-        }
-
-        selection.formatText('bold');
-
-        expect(text2.hasFormat('bold')).toBe(true);
       });
     });
   });
@@ -2498,6 +2412,113 @@ describe('LexicalSelection tests', () => {
     });
   });
 
+  describe('$patchStyle', () => {
+    it('should patch the style with the new style object', async () => {
+      await ReactTestUtils.act(async () => {
+        await editor!.update(() => {
+          const root = $getRoot();
+          const paragraph = $createParagraphNode();
+          const textNode = $createTextNode('Hello, World!');
+          textNode.setStyle('font-family: serif; color: red;');
+          $addNodeStyle(textNode);
+          paragraph.append(textNode);
+          root.append(paragraph);
+
+          const selection = $createRangeSelection();
+          $setSelection(selection);
+          selection.insertParagraph();
+          $setAnchorPoint({
+            key: textNode.getKey(),
+            offset: 0,
+            type: 'text',
+          });
+
+          $setFocusPoint({
+            key: textNode.getKey(),
+            offset: 10,
+            type: 'text',
+          });
+
+          const newStyle = {
+            color: 'blue',
+            'font-family': 'Arial',
+          };
+
+          $patchStyleText(selection, newStyle);
+
+          const cssFontFamilyValue = $getSelectionStyleValueForProperty(
+            selection,
+            'font-family',
+            '',
+          );
+          expect(cssFontFamilyValue).toBe('Arial');
+
+          const cssColorValue = $getSelectionStyleValueForProperty(
+            selection,
+            'color',
+            '',
+          );
+          expect(cssColorValue).toBe('blue');
+        });
+      });
+    });
+
+    it('should patch the style with property function', async () => {
+      await ReactTestUtils.act(async () => {
+        await editor!.update(() => {
+          const currentColor = 'red';
+          const nextColor = 'blue';
+
+          const root = $getRoot();
+          const paragraph = $createParagraphNode();
+          const textNode = $createTextNode('Hello, World!');
+          textNode.setStyle(`color: ${currentColor};`);
+          $addNodeStyle(textNode);
+          paragraph.append(textNode);
+          root.append(paragraph);
+
+          const selection = $createRangeSelection();
+          $setSelection(selection);
+          selection.insertParagraph();
+          $setAnchorPoint({
+            key: textNode.getKey(),
+            offset: 0,
+            type: 'text',
+          });
+
+          $setFocusPoint({
+            key: textNode.getKey(),
+            offset: 10,
+            type: 'text',
+          });
+
+          const newStyle = {
+            color: jest.fn(
+              (current: string | null, target: LexicalNode | RangeSelection) =>
+                nextColor,
+            ),
+          };
+
+          $patchStyleText(selection, newStyle);
+
+          const cssColorValue = $getSelectionStyleValueForProperty(
+            selection,
+            'color',
+            '',
+          );
+
+          expect(cssColorValue).toBe(nextColor);
+          expect(newStyle.color).toHaveBeenCalledTimes(1);
+
+          const lastCall = newStyle.color.mock.lastCall!;
+          expect(lastCall[0]).toBe(currentColor);
+          // @ts-ignore - It expected to be a LexicalNode
+          expect($isTextNode(lastCall[1])).toBeTruthy();
+        });
+      });
+    });
+  });
+
   describe('$setBlocksType', () => {
     test('Collapsed selection in text', async () => {
       const testEditor = createTestEditor();
@@ -2645,7 +2666,11 @@ describe('LexicalSelection tests', () => {
         expect(rootChildren[1].__type).toBe('heading');
         expect(rootChildren.length).toBe(2);
         const sel = $getSelection()!;
-        expect(sel.getNodes().length).toBe(2);
+        expect(sel).toMatchObject({
+          anchor: {key: rootChildren[0].__key, offset: 0, type: 'element'},
+          focus: {key: rootChildren[1].__key, offset: 0, type: 'element'},
+        });
+        expect(sel.getNodes()).toEqual(rootChildren);
       });
     });
 
@@ -2897,15 +2922,17 @@ describe('LexicalSelection tests', () => {
         const root = $getRoot();
         const ul1 = $createListNode('bullet');
         const text1 = $createTextNode('1');
-        const li1 = $createListItemNode().append(text1);
+        const li1 = $createListItemNode();
         const li1_wrapper = $createListItemNode();
         const ul2 = $createListNode('bullet');
         const text1_1 = $createTextNode('1.1');
-        const li1_1 = $createListItemNode().append(text1_1);
-        ul1.append(li1, li1_wrapper);
-        li1_wrapper.append(ul2);
-        ul2.append(li1_1);
-        root.append(ul1);
+        const li1_1 = $createListItemNode();
+        root.append(
+          ul1.append(
+            li1.append(text1),
+            li1_wrapper.append(ul2.append(li1_1.append(text1_1))),
+          ),
+        );
 
         const selection = $createRangeSelection();
         $setSelection(selection);
@@ -2929,7 +2956,7 @@ describe('LexicalSelection tests', () => {
       );
     });
 
-    test('Nested list with listItem twice indented from his father', async () => {
+    test('Nested list with listItem twice indented from its parent', async () => {
       const testEditor = createTestEditor();
       const element = document.createElement('div');
       testEditor.setRootElement(element);
@@ -2940,11 +2967,10 @@ describe('LexicalSelection tests', () => {
         const li1_wrapper = $createListItemNode();
         const ul2 = $createListNode('bullet');
         const text1_1 = $createTextNode('1.1');
-        const li1_1 = $createListItemNode().append(text1_1);
-        ul1.append(li1_wrapper);
-        li1_wrapper.append(ul2);
-        ul2.append(li1_1);
-        root.append(ul1);
+        const li1_1 = $createListItemNode();
+        root.append(
+          ul1.append(li1_wrapper.append(ul2.append(li1_1.append(text1_1)))),
+        );
 
         const selection = $createRangeSelection();
         $setSelection(selection);

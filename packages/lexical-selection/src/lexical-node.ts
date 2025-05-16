@@ -6,20 +6,22 @@
  *
  */
 import {
+  $caretRangeFromSelection,
   $createTextNode,
   $getCharacterOffsets,
   $getNodeByKey,
   $getPreviousSelection,
+  $getSelection,
   $isElementNode,
-  $isParagraphNode,
   $isRangeSelection,
   $isRootNode,
   $isTextNode,
+  $isTokenOrSegmented,
   BaseSelection,
   ElementNode,
   LexicalEditor,
   LexicalNode,
-  ParagraphNode,
+  NodeKey,
   Point,
   RangeSelection,
   TextNode,
@@ -32,65 +34,6 @@ import {
   getStyleObjectFromCSS,
   getStyleObjectFromRawCSS,
 } from './utils';
-
-function $updateElementNodeProperties<T extends ElementNode>(
-  target: T,
-  source: ElementNode,
-): T {
-  target.__first = source.__first;
-  target.__last = source.__last;
-  target.__size = source.__size;
-  target.__format = source.__format;
-  target.__indent = source.__indent;
-  target.__dir = source.__dir;
-  return target;
-}
-
-function $updateTextNodeProperties<T extends TextNode>(
-  target: T,
-  source: TextNode,
-): T {
-  target.__format = source.__format;
-  target.__style = source.__style;
-  target.__mode = source.__mode;
-  target.__detail = source.__detail;
-  return target;
-}
-
-function $updateParagraphNodeProperties<T extends ParagraphNode>(
-  target: T,
-  source: ParagraphNode,
-): T {
-  target.__textFormat = source.__textFormat;
-  return target;
-}
-
-/**
- * Returns a copy of a node, but generates a new key for the copy.
- * @param node - The node to be cloned.
- * @returns The clone of the node.
- */
-export function $cloneWithProperties<T extends LexicalNode>(node: T): T {
-  const constructor = node.constructor;
-  // @ts-expect-error
-  const clone: T = constructor.clone(node);
-  clone.__parent = node.__parent;
-  clone.__next = node.__next;
-  clone.__prev = node.__prev;
-
-  if ($isElementNode(node) && $isElementNode(clone)) {
-    return $updateElementNodeProperties(clone, node);
-  }
-
-  if ($isTextNode(node) && $isTextNode(clone)) {
-    return $updateTextNodeProperties(clone, node);
-  }
-
-  if ($isParagraphNode(node) && $isParagraphNode(clone)) {
-    return $updateParagraphNodeProperties(clone, node);
-  }
-  return clone;
-}
 
 /**
  * Generally used to append text content to HTML and JSON. Grabs the text content and "slices"
@@ -300,20 +243,39 @@ export function $addNodeStyle(node: TextNode): void {
   CSS_TO_STYLES.set(CSSText, styles);
 }
 
-function $patchStyle(
-  target: TextNode | RangeSelection,
+/**
+ * Applies the provided styles to the given TextNode, ElementNode, or
+ * collapsed RangeSelection.
+ *
+ * @param target - The TextNode, ElementNode, or collapsed RangeSelection to apply the styles to
+ * @param patch - The patch to apply, which can include multiple styles. \\{CSSProperty: value\\} . Can also accept a function that returns the new property value.
+ */
+export function $patchStyle(
+  target: TextNode | RangeSelection | ElementNode,
   patch: Record<
     string,
-    string | null | ((currentStyleValue: string | null) => string)
+    | string
+    | null
+    | ((currentStyleValue: string | null, _target: typeof target) => string)
   >,
 ): void {
+  invariant(
+    $isRangeSelection(target)
+      ? target.isCollapsed()
+      : $isTextNode(target) || $isElementNode(target),
+    '$patchStyle must only be called with a TextNode, ElementNode, or collapsed RangeSelection',
+  );
   const prevStyles = getStyleObjectFromCSS(
-    'getStyle' in target ? target.getStyle() : target.style,
+    $isRangeSelection(target)
+      ? target.style
+      : $isTextNode(target)
+      ? target.getStyle()
+      : target.getTextStyle(),
   );
   const newStyles = Object.entries(patch).reduce<Record<string, string>>(
     (styles, [key, value]) => {
-      if (value instanceof Function) {
-        styles[key] = value(prevStyles[key]);
+      if (typeof value === 'function') {
+        styles[key] = value(prevStyles[key], target);
       } else if (value === null) {
         delete styles[key];
       } else {
@@ -321,10 +283,14 @@ function $patchStyle(
       }
       return styles;
     },
-    {...prevStyles} || {},
+    {...prevStyles},
   );
   const newCSSText = getCSSFromStyleObject(newStyles);
-  target.setStyle(newCSSText);
+  if ($isRangeSelection(target) || $isTextNode(target)) {
+    target.setStyle(newCSSText);
+  } else {
+    target.setTextStyle(newCSSText);
+  }
   CSS_TO_STYLES.set(newCSSText, newStyles);
 }
 
@@ -339,140 +305,107 @@ export function $patchStyleText(
   selection: BaseSelection,
   patch: Record<
     string,
-    string | null | ((currentStyleValue: string | null) => string)
+    | string
+    | null
+    | ((
+        currentStyleValue: string | null,
+        target: TextNode | RangeSelection | ElementNode,
+      ) => string)
   >,
 ): void {
-  const selectedNodes = selection.getNodes();
-  const selectedNodesLength = selectedNodes.length;
-  const anchorAndFocus = selection.getStartEndPoints();
-  if (anchorAndFocus === null) {
-    return;
-  }
-  const [anchor, focus] = anchorAndFocus;
-
-  const lastIndex = selectedNodesLength - 1;
-  let firstNode = selectedNodes[0];
-  let lastNode = selectedNodes[lastIndex];
-
-  if (selection.isCollapsed() && $isRangeSelection(selection)) {
+  if ($isRangeSelection(selection) && selection.isCollapsed()) {
     $patchStyle(selection, patch);
+    const emptyNode = selection.anchor.getNode();
+    if ($isElementNode(emptyNode) && emptyNode.isEmpty()) {
+      $patchStyle(emptyNode, patch);
+    }
+  }
+  $forEachSelectedTextNode((textNode) => {
+    $patchStyle(textNode, patch);
+  });
+}
+
+export function $forEachSelectedTextNode(
+  fn: (textNode: TextNode) => void,
+): void {
+  const selection = $getSelection();
+  if (!selection) {
     return;
   }
 
-  const firstNodeText = firstNode.getTextContent();
-  const firstNodeTextLength = firstNodeText.length;
-  const focusOffset = focus.offset;
-  let anchorOffset = anchor.offset;
-  const isBefore = anchor.isBefore(focus);
-  let startOffset = isBefore ? anchorOffset : focusOffset;
-  let endOffset = isBefore ? focusOffset : anchorOffset;
-  const startType = isBefore ? anchor.type : focus.type;
-  const endType = isBefore ? focus.type : anchor.type;
-  const endKey = isBefore ? focus.key : anchor.key;
+  const slicedTextNodes = new Map<
+    NodeKey,
+    [startIndex: number, endIndex: number]
+  >();
+  const getSliceIndices = (
+    node: TextNode,
+  ): [startIndex: number, endIndex: number] =>
+    slicedTextNodes.get(node.getKey()) || [0, node.getTextContentSize()];
 
-  // This is the case where the user only selected the very end of the
-  // first node so we don't want to include it in the formatting change.
-  if ($isTextNode(firstNode) && startOffset === firstNodeTextLength) {
-    const nextSibling = firstNode.getNextSibling();
-
-    if ($isTextNode(nextSibling)) {
-      // we basically make the second node the firstNode, changing offsets accordingly
-      anchorOffset = 0;
-      startOffset = 0;
-      firstNode = nextSibling;
+  if ($isRangeSelection(selection)) {
+    for (const slice of $caretRangeFromSelection(selection).getTextSlices()) {
+      if (slice) {
+        slicedTextNodes.set(
+          slice.caret.origin.getKey(),
+          slice.getSliceIndices(),
+        );
+      }
     }
   }
 
-  // This is the case where we only selected a single node
-  if (selectedNodes.length === 1) {
-    if ($isTextNode(firstNode) && firstNode.canHaveFormat()) {
-      startOffset =
-        startType === 'element'
-          ? 0
-          : anchorOffset > focusOffset
-          ? focusOffset
-          : anchorOffset;
-      endOffset =
-        endType === 'element'
-          ? firstNodeTextLength
-          : anchorOffset > focusOffset
-          ? anchorOffset
-          : focusOffset;
+  const selectedNodes = selection.getNodes();
+  for (const selectedNode of selectedNodes) {
+    if (!($isTextNode(selectedNode) && selectedNode.canHaveFormat())) {
+      continue;
+    }
+    const [startOffset, endOffset] = getSliceIndices(selectedNode);
+    // No actual text is selected, so do nothing.
+    if (endOffset === startOffset) {
+      continue;
+    }
 
-      // No actual text is selected, so do nothing.
-      if (startOffset === endOffset) {
-        return;
-      }
-
-      // The entire node is selected, so just format it
-      if (startOffset === 0 && endOffset === firstNodeTextLength) {
-        $patchStyle(firstNode, patch);
-        firstNode.select(startOffset, endOffset);
-      } else {
-        // The node is partially selected, so split it into two nodes
-        // and style the selected one.
-        const splitNodes = firstNode.splitText(startOffset, endOffset);
-        const replacement = startOffset === 0 ? splitNodes[0] : splitNodes[1];
-        $patchStyle(replacement, patch);
-        replacement.select(0, endOffset - startOffset);
-      }
-    } // multiple nodes selected.
-  } else {
+    // The entire node is selected or a token/segment, so just format it
     if (
-      $isTextNode(firstNode) &&
-      startOffset < firstNode.getTextContentSize() &&
-      firstNode.canHaveFormat()
+      $isTokenOrSegmented(selectedNode) ||
+      (startOffset === 0 && endOffset === selectedNode.getTextContentSize())
     ) {
-      if (startOffset !== 0) {
-        // the entire first node isn't selected, so split it
-        firstNode = firstNode.splitText(startOffset)[1];
-        startOffset = 0;
-        if (isBefore) {
-          anchor.set(firstNode.getKey(), startOffset, 'text');
-        } else {
-          focus.set(firstNode.getKey(), startOffset, 'text');
-        }
-      }
-
-      $patchStyle(firstNode as TextNode, patch);
+      fn(selectedNode);
+    } else {
+      // The node is partially selected, so split it into two or three nodes
+      // and style the selected one.
+      const splitNodes = selectedNode.splitText(startOffset, endOffset);
+      const replacement = splitNodes[startOffset === 0 ? 0 : 1];
+      fn(replacement);
     }
+  }
+  // Prior to NodeCaret #7046 this would have been a side-effect
+  // so we do this for test compatibility.
+  // TODO: we may want to consider simplifying by removing this
+  if (
+    $isRangeSelection(selection) &&
+    selection.anchor.type === 'text' &&
+    selection.focus.type === 'text' &&
+    selection.anchor.key === selection.focus.key
+  ) {
+    $ensureForwardRangeSelection(selection);
+  }
+}
 
-    if ($isTextNode(lastNode) && lastNode.canHaveFormat()) {
-      const lastNodeText = lastNode.getTextContent();
-      const lastNodeTextLength = lastNodeText.length;
-
-      // The last node might not actually be the end node
-      //
-      // If not, assume the last node is fully-selected unless the end offset is
-      // zero.
-      if (lastNode.__key !== endKey && endOffset !== 0) {
-        endOffset = lastNodeTextLength;
-      }
-
-      // if the entire last node isn't selected, split it
-      if (endOffset !== lastNodeTextLength) {
-        [lastNode] = lastNode.splitText(endOffset);
-      }
-
-      if (endOffset !== 0 || endType === 'element') {
-        $patchStyle(lastNode as TextNode, patch);
-      }
-    }
-
-    // style all the text nodes in between
-    for (let i = 1; i < lastIndex; i++) {
-      const selectedNode = selectedNodes[i];
-      const selectedNodeKey = selectedNode.getKey();
-
-      if (
-        $isTextNode(selectedNode) &&
-        selectedNode.canHaveFormat() &&
-        selectedNodeKey !== firstNode.getKey() &&
-        selectedNodeKey !== lastNode.getKey() &&
-        !selectedNode.isToken()
-      ) {
-        $patchStyle(selectedNode, patch);
-      }
-    }
+/**
+ * Ensure that the given RangeSelection is not backwards. If it
+ * is backwards, then the anchor and focus points will be swapped
+ * in-place. Ensuring that the selection is a writable RangeSelection
+ * is the responsibility of the caller (e.g. in a read-only context
+ * you will want to clone $getSelection() before using this).
+ *
+ * @param selection a writable RangeSelection
+ */
+export function $ensureForwardRangeSelection(selection: RangeSelection): void {
+  if (selection.isBackward()) {
+    const {anchor, focus} = selection;
+    // stash for the in-place swap
+    const {key, offset, type} = anchor;
+    anchor.set(focus.key, focus.offset, focus.type);
+    focus.set(key, offset, type);
   }
 }

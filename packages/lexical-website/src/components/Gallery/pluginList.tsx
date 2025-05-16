@@ -30,6 +30,12 @@ export const plugins = (customFields: {
     description: 'Learn how to create an editor with Real Time Collaboration',
     tags: ['opensource', 'favorite'],
     title: 'Collab RichText',
-    uri: 'https://stackblitz.com/github/facebook/lexical/tree/fix/collab_example/examples/react-rich-collab?ctl=0&file=src%2Fmain.tsx&terminalHeight=0&embed=1',
+    uri: `${customFields.STACKBLITZ_PREFIX}examples/react-rich-collab?ctl=0&file=src%2Fmain.tsx&terminalHeight=0&embed=1`,
+  },
+  {
+    description: 'Learn how to create an editor with Tables',
+    tags: ['opensource', 'favorite'],
+    title: 'TablePlugin',
+    uri: `${customFields.STACKBLITZ_PREFIX}examples/react-table?embed=1&file=src%2Fmain.tsx&terminalHeight=0&ctl=0`,
   },
 ];

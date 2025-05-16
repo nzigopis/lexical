@@ -7,12 +7,6 @@
  */
 
 import type {ListNode} from '@lexical/list';
-import type {
-  ElementTransformer,
-  TextFormatTransformer,
-  TextMatchTransformer,
-  Transformer,
-} from '@lexical/markdown';
 
 import {$isCodeNode} from '@lexical/code';
 import {$isListItemNode, $isListNode} from '@lexical/list';
@@ -24,6 +18,14 @@ import {
   type LexicalNode,
   type TextFormatType,
 } from 'lexical';
+
+import {
+  ElementTransformer,
+  MultilineElementTransformer,
+  TextFormatTransformer,
+  TextMatchTransformer,
+  Transformer,
+} from './MarkdownTransformers';
 
 type MarkdownFormatKind =
   | 'noTransformation'
@@ -403,12 +405,16 @@ function codeBlockExport(node: LexicalNode) {
 
 export function indexBy<T>(
   list: Array<T>,
-  callback: (arg0: T) => string,
+  callback: (arg0: T) => string | undefined,
 ): Readonly<Record<string, Array<T>>> {
   const index: Record<string, Array<T>> = {};
 
   for (const item of list) {
     const key = callback(item);
+
+    if (!key) {
+      continue;
+    }
 
     if (index[key]) {
       index[key].push(item);
@@ -422,6 +428,7 @@ export function indexBy<T>(
 
 export function transformersByType(transformers: Array<Transformer>): Readonly<{
   element: Array<ElementTransformer>;
+  multilineElement: Array<MultilineElementTransformer>;
   textFormat: Array<TextFormatTransformer>;
   textMatch: Array<TextMatchTransformer>;
 }> {
@@ -429,6 +436,8 @@ export function transformersByType(transformers: Array<Transformer>): Readonly<{
 
   return {
     element: (byType.element || []) as Array<ElementTransformer>,
+    multilineElement: (byType['multiline-element'] ||
+      []) as Array<MultilineElementTransformer>,
     textFormat: (byType['text-format'] || []) as Array<TextFormatTransformer>,
     textMatch: (byType['text-match'] || []) as Array<TextMatchTransformer>,
   };
@@ -450,4 +459,38 @@ export function isEmptyParagraph(node: LexicalNode): boolean {
       $isTextNode(firstChild) &&
       MARKDOWN_EMPTY_LINE_REG_EXP.test(firstChild.getTextContent()))
   );
+}
+
+export const PHONE_NUMBER_REGEX = /^\+?[0-9\s()-]{5,}$/;
+
+/**
+ * Formats a URL string by adding appropriate protocol if missing
+ *
+ * @param url - URL to format
+ * @returns Formatted URL with appropriate protocol
+ */
+export function formatUrl(url: string): string {
+  // Check if URL already has a protocol
+  if (url.match(/^[a-z][a-z0-9+.-]*:/i)) {
+    // URL already has a protocol, leave it as is
+    return url;
+  }
+  // Check if it's a relative path (starting with '/', '.', or '#')
+  else if (url.match(/^[/#.]/)) {
+    // Relative path, leave it as is
+    return url;
+  }
+
+  // Check for email address
+  else if (url.includes('@')) {
+    return `mailto:${url}`;
+  }
+
+  // Check for phone number
+  else if (PHONE_NUMBER_REGEX.test(url)) {
+    return `tel:${url}`;
+  }
+
+  // For everything else, return with https:// prefix
+  return `https://${url}`;
 }

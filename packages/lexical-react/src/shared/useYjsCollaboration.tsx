@@ -6,8 +6,9 @@
  *
  */
 
-import type {Binding, Provider} from '@lexical/yjs';
+import type {Binding, Provider, SyncCursorPositionsFn} from '@lexical/yjs';
 import type {LexicalEditor} from 'lexical';
+import type {JSX} from 'react';
 
 import {mergeRegister} from '@lexical/utils';
 import {
@@ -29,7 +30,9 @@ import {
   CAN_UNDO_COMMAND,
   COMMAND_PRIORITY_EDITOR,
   FOCUS_COMMAND,
+  HISTORY_MERGE_TAG,
   REDO_COMMAND,
+  SKIP_COLLAB_TAG,
   UNDO_COMMAND,
 } from 'lexical';
 import * as React from 'react';
@@ -54,12 +57,11 @@ export function useYjsCollaboration(
   cursorsContainerRef?: CursorsContainerRef,
   initialEditorState?: InitialEditorStateType,
   awarenessData?: object,
+  syncCursorPositionsFn: SyncCursorPositionsFn = syncCursorPositions,
 ): JSX.Element {
   const isReloadingDoc = useRef(false);
 
-  const connect = useCallback(() => {
-    provider.connect();
-  }, [provider]);
+  const connect = useCallback(() => provider.connect(), [provider]);
 
   const disconnect = useCallback(() => {
     try {
@@ -92,7 +94,7 @@ export function useYjsCollaboration(
     };
 
     const onAwarenessUpdate = () => {
-      syncCursorPositions(binding, provider);
+      syncCursorPositionsFn(binding, provider);
     };
 
     const onYjsTreeChanges = (
@@ -104,7 +106,13 @@ export function useYjsCollaboration(
       const origin = transaction.origin;
       if (origin !== binding) {
         const isFromUndoManger = origin instanceof UndoManager;
-        syncYjsChangesToLexical(binding, provider, events, isFromUndoManger);
+        syncYjsChangesToLexical(
+          binding,
+          provider,
+          events,
+          isFromUndoManger,
+          syncCursorPositionsFn,
+        );
       }
     };
 
@@ -127,7 +135,7 @@ export function useYjsCollaboration(
     provider.on('status', onStatus);
     provider.on('sync', onSync);
     awareness.on('update', onAwarenessUpdate);
-    // This updates the local editor state when we recieve updates from other clients
+    // This updates the local editor state when we receive updates from other clients
     root.getSharedType().observeDeep(onYjsTreeChanges);
     const removeListener = editor.registerUpdateListener(
       ({
@@ -138,7 +146,7 @@ export function useYjsCollaboration(
         normalizedNodes,
         tags,
       }) => {
-        if (tags.has('skip-collab') === false) {
+        if (tags.has(SKIP_COLLAB_TAG) === false) {
           syncLexicalUpdateToYjs(
             binding,
             provider,
@@ -152,11 +160,23 @@ export function useYjsCollaboration(
         }
       },
     );
-    connect();
+
+    const connectionPromise = connect();
 
     return () => {
       if (isReloadingDoc.current === false) {
-        disconnect();
+        if (connectionPromise) {
+          connectionPromise.then(disconnect);
+        } else {
+          // Workaround for race condition in StrictMode. It's possible there
+          // is a different race for the above case where connect returns a
+          // promise, but we don't have an example of that in-repo.
+          // It's possible that there is a similar issue with
+          // TOGGLE_CONNECT_COMMAND below when the provider connect returns a
+          // promise.
+          // https://github.com/facebook/lexical/issues/6640
+          disconnect();
+        }
       }
 
       provider.off('sync', onSync);
@@ -181,6 +201,7 @@ export function useYjsCollaboration(
     shouldBootstrap,
     awarenessData,
     setDoc,
+    syncCursorPositionsFn,
   ]);
   const cursorsContainer = useMemo(() => {
     const ref = (element: null | HTMLElement) => {
@@ -197,18 +218,16 @@ export function useYjsCollaboration(
     return editor.registerCommand(
       TOGGLE_CONNECT_COMMAND,
       (payload) => {
-        if (connect !== undefined && disconnect !== undefined) {
-          const shouldConnect = payload;
+        const shouldConnect = payload;
 
-          if (shouldConnect) {
-            // eslint-disable-next-line no-console
-            console.log('Collaboration connected!');
-            connect();
-          } else {
-            // eslint-disable-next-line no-console
-            console.log('Collaboration disconnected!');
-            disconnect();
-          }
+        if (shouldConnect) {
+          // eslint-disable-next-line no-console
+          console.log('Collaboration connected!');
+          connect();
+        } else {
+          // eslint-disable-next-line no-console
+          console.log('Collaboration disconnected!');
+          disconnect();
         }
 
         return true;
@@ -329,11 +348,15 @@ function initializeEditor(
             case 'string': {
               const parsedEditorState =
                 editor.parseEditorState(initialEditorState);
-              editor.setEditorState(parsedEditorState, {tag: 'history-merge'});
+              editor.setEditorState(parsedEditorState, {
+                tag: HISTORY_MERGE_TAG,
+              });
               break;
             }
             case 'object': {
-              editor.setEditorState(initialEditorState, {tag: 'history-merge'});
+              editor.setEditorState(initialEditorState, {
+                tag: HISTORY_MERGE_TAG,
+              });
               break;
             }
             case 'function': {
@@ -344,7 +367,7 @@ function initializeEditor(
                     initialEditorState(editor);
                   }
                 },
-                {tag: 'history-merge'},
+                {tag: HISTORY_MERGE_TAG},
               );
               break;
             }
@@ -365,7 +388,7 @@ function initializeEditor(
       }
     },
     {
-      tag: 'history-merge',
+      tag: HISTORY_MERGE_TAG,
     },
   );
 }
@@ -379,7 +402,7 @@ function clearEditorSkipCollab(editor: LexicalEditor, binding: Binding) {
       root.select();
     },
     {
-      tag: 'skip-collab',
+      tag: SKIP_COLLAB_TAG,
     },
   );
 

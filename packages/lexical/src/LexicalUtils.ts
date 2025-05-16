@@ -20,7 +20,12 @@ import type {
   Spread,
 } from './LexicalEditor';
 import type {EditorState} from './LexicalEditorState';
-import type {LexicalNode, NodeKey, NodeMap} from './LexicalNode';
+import type {
+  LexicalNode,
+  LexicalPrivateDOM,
+  NodeKey,
+  NodeMap,
+} from './LexicalNode';
 import type {
   BaseSelection,
   PointType,
@@ -46,10 +51,15 @@ import {
   $isTextNode,
   DecoratorNode,
   ElementNode,
+  HISTORY_MERGE_TAG,
   LineBreakNode,
+  UpdateTag,
 } from '.';
 import {
   COMPOSITION_SUFFIX,
+  DOM_DOCUMENT_FRAGMENT_TYPE,
+  DOM_DOCUMENT_TYPE,
+  DOM_ELEMENT_TYPE,
   DOM_TEXT_TYPE,
   HAS_DIRTY_NODES,
   LTR_REGEX,
@@ -57,7 +67,7 @@ import {
   TEXT_TYPE_TO_FORMAT,
 } from './LexicalConstants';
 import {LexicalEditor} from './LexicalEditor';
-import {$flushRootMutations} from './LexicalMutations';
+import {flushRootMutations} from './LexicalMutations';
 import {$normalizeSelection} from './LexicalNormalization';
 import {
   errorOnInfiniteTransforms,
@@ -67,7 +77,6 @@ import {
   internalGetActiveEditorState,
   isCurrentlyReadOnlyMode,
   triggerCommandListeners,
-  updateEditor,
 } from './LexicalUpdates';
 
 export const emptyFunction = () => {
@@ -110,9 +119,9 @@ export function $isSelectionCapturedInDecorator(node: Node): boolean {
 }
 
 export function isSelectionCapturedInDecoratorInput(anchorDOM: Node): boolean {
-  const activeElement = document.activeElement as HTMLElement;
+  const activeElement = document.activeElement;
 
-  if (activeElement === null) {
+  if (!isHTMLElement(activeElement)) {
     return false;
   }
   const nodeName = activeElement.nodeName;
@@ -122,8 +131,7 @@ export function isSelectionCapturedInDecoratorInput(anchorDOM: Node): boolean {
     (nodeName === 'INPUT' ||
       nodeName === 'TEXTAREA' ||
       (activeElement.contentEditable === 'true' &&
-        // @ts-ignore internal field
-        activeElement.__lexicalEditor == null))
+        getEditorPropertyFromDOMNode(activeElement) == null))
   );
 }
 
@@ -140,7 +148,7 @@ export function isSelectionWithinEditor(
       rootElement.contains(focusDOM) &&
       // Ignore if selection is within nested editor
       anchorDOM !== null &&
-      !isSelectionCapturedInDecoratorInput(anchorDOM as Node) &&
+      !isSelectionCapturedInDecoratorInput(anchorDOM) &&
       getNearestEditorFromDOMNode(anchorDOM) === editor
     );
   } catch (error) {
@@ -148,19 +156,32 @@ export function isSelectionWithinEditor(
   }
 }
 
+/**
+ * @returns true if the given argument is a LexicalEditor instance from this build of Lexical
+ */
+export function isLexicalEditor(editor: unknown): editor is LexicalEditor {
+  // Check instanceof to prevent issues with multiple embedded Lexical installations
+  return editor instanceof LexicalEditor;
+}
+
 export function getNearestEditorFromDOMNode(
   node: Node | null,
 ): LexicalEditor | null {
   let currentNode = node;
   while (currentNode != null) {
-    // @ts-expect-error: internal field
-    const editor: LexicalEditor = currentNode.__lexicalEditor;
-    if (editor != null) {
+    const editor = getEditorPropertyFromDOMNode(currentNode);
+    if (isLexicalEditor(editor)) {
       return editor;
     }
     currentNode = getParentElement(currentNode);
   }
   return null;
+}
+
+/** @internal */
+export function getEditorPropertyFromDOMNode(node: Node | null): unknown {
+  // @ts-expect-error: internal field
+  return node ? node.__lexicalEditor : null;
 }
 
 export function getTextDirection(text: string): 'ltr' | 'rtl' | null {
@@ -177,14 +198,26 @@ export function $isTokenOrSegmented(node: TextNode): boolean {
   return node.isToken() || node.isSegmented();
 }
 
-function isDOMNodeLexicalTextNode(node: Node): node is Text {
-  return node.nodeType === DOM_TEXT_TYPE;
+/**
+ * @param node - The element being tested
+ * @returns Returns true if node is an DOM Text node, false otherwise.
+ */
+export function isDOMTextNode(node: unknown): node is Text {
+  return isDOMNode(node) && node.nodeType === DOM_TEXT_TYPE;
+}
+
+/**
+ * @param node - The element being tested
+ * @returns Returns true if node is an DOM Document node, false otherwise.
+ */
+export function isDOMDocumentNode(node: unknown): node is Document {
+  return isDOMNode(node) && node.nodeType === DOM_DOCUMENT_TYPE;
 }
 
 export function getDOMTextNode(element: Node | null): Text | null {
   let node = element;
   while (node != null) {
-    if (isDOMNodeLexicalTextNode(node)) {
+    if (isDOMTextNode(node)) {
       return node;
     }
     node = node.firstChild;
@@ -209,6 +242,15 @@ export function toggleTextFormatType(
     newFormat &= ~TEXT_TYPE_TO_FORMAT.superscript;
   } else if (type === 'superscript') {
     newFormat &= ~TEXT_TYPE_TO_FORMAT.subscript;
+  } else if (type === 'lowercase') {
+    newFormat &= ~TEXT_TYPE_TO_FORMAT.uppercase;
+    newFormat &= ~TEXT_TYPE_TO_FORMAT.capitalize;
+  } else if (type === 'uppercase') {
+    newFormat &= ~TEXT_TYPE_TO_FORMAT.lowercase;
+    newFormat &= ~TEXT_TYPE_TO_FORMAT.capitalize;
+  } else if (type === 'capitalize') {
+    newFormat &= ~TEXT_TYPE_TO_FORMAT.lowercase;
+    newFormat &= ~TEXT_TYPE_TO_FORMAT.uppercase;
   }
   return newFormat;
 }
@@ -298,6 +340,13 @@ function internalMarkParentElementsAsDirty(
 }
 
 // TODO #6031 this function or their callers have to adjust selection (i.e. insertBefore)
+/**
+ * Removes a node from its parent, updating all necessary pointers and links.
+ * @internal
+ *
+ * This function is for internal use of the library.
+ * Please do not use it as it may change in the future.
+ */
 export function removeFromParent(node: LexicalNode): void {
   const oldParent = node.getParent();
   if (oldParent !== null) {
@@ -305,47 +354,40 @@ export function removeFromParent(node: LexicalNode): void {
     const writableParent = oldParent.getWritable();
     const prevSibling = node.getPreviousSibling();
     const nextSibling = node.getNextSibling();
-    // TODO: this function duplicates a bunch of operations, can be simplified.
+
+    // Store sibling keys
+    const nextSiblingKey = nextSibling !== null ? nextSibling.__key : null;
+    const prevSiblingKey = prevSibling !== null ? prevSibling.__key : null;
+
+    // Get writable siblings once
+    const writablePrevSibling =
+      prevSibling !== null ? prevSibling.getWritable() : null;
+    const writableNextSibling =
+      nextSibling !== null ? nextSibling.getWritable() : null;
+
+    // Update parent's first/last pointers
     if (prevSibling === null) {
-      if (nextSibling !== null) {
-        const writableNextSibling = nextSibling.getWritable();
-        writableParent.__first = nextSibling.__key;
-        writableNextSibling.__prev = null;
-      } else {
-        writableParent.__first = null;
-      }
-    } else {
-      const writablePrevSibling = prevSibling.getWritable();
-      if (nextSibling !== null) {
-        const writableNextSibling = nextSibling.getWritable();
-        writableNextSibling.__prev = writablePrevSibling.__key;
-        writablePrevSibling.__next = writableNextSibling.__key;
-      } else {
-        writablePrevSibling.__next = null;
-      }
-      writableNode.__prev = null;
+      writableParent.__first = nextSiblingKey;
     }
     if (nextSibling === null) {
-      if (prevSibling !== null) {
-        const writablePrevSibling = prevSibling.getWritable();
-        writableParent.__last = prevSibling.__key;
-        writablePrevSibling.__next = null;
-      } else {
-        writableParent.__last = null;
-      }
-    } else {
-      const writableNextSibling = nextSibling.getWritable();
-      if (prevSibling !== null) {
-        const writablePrevSibling = prevSibling.getWritable();
-        writablePrevSibling.__next = writableNextSibling.__key;
-        writableNextSibling.__prev = writablePrevSibling.__key;
-      } else {
-        writableNextSibling.__prev = null;
-      }
-      writableNode.__next = null;
+      writableParent.__last = prevSiblingKey;
     }
-    writableParent.__size--;
+
+    // Update sibling links
+    if (writablePrevSibling !== null) {
+      writablePrevSibling.__next = nextSiblingKey;
+    }
+    if (writableNextSibling !== null) {
+      writableNextSibling.__prev = prevSiblingKey;
+    }
+
+    // Clear node's links
+    writableNode.__prev = null;
+    writableNode.__next = null;
     writableNode.__parent = null;
+
+    // Update parent size
+    writableParent.__size--;
   }
 }
 
@@ -367,7 +409,6 @@ export function internalMarkNodeAsDirty(node: LexicalNode): void {
   if ($isElementNode(node)) {
     dirtyElements.set(key, true);
   } else {
-    // TODO split internally MarkNodeAsDirty into two dedicated Element/leave functions
     editor._dirtyLeaves.add(key);
   }
 }
@@ -429,12 +470,28 @@ export function $getNodeFromDOMNode(
   editorState?: EditorState,
 ): LexicalNode | null {
   const editor = getActiveEditor();
-  // @ts-ignore We intentionally add this to the Node.
-  const key = dom[`__lexicalKey_${editor._key}`];
+  const key = getNodeKeyFromDOMNode(dom, editor);
   if (key !== undefined) {
     return $getNodeByKey(key, editorState);
   }
   return null;
+}
+
+export function setNodeKeyOnDOMNode(
+  dom: Node,
+  editor: LexicalEditor,
+  key: NodeKey,
+) {
+  const prop = `__lexicalKey_${editor._key}`;
+  (dom as Node & Record<typeof prop, NodeKey | undefined>)[prop] = key;
+}
+
+export function getNodeKeyFromDOMNode(
+  dom: Node,
+  editor: LexicalEditor,
+): NodeKey | undefined {
+  const prop = `__lexicalKey_${editor._key}`;
+  return (dom as Node & Record<typeof prop, NodeKey | undefined>)[prop];
 }
 
 export function $getNearestNodeFromDOMNode(
@@ -465,27 +522,41 @@ export function getEditorStateTextContent(editorState: EditorState): string {
   return editorState.read(() => $getRoot().getTextContent());
 }
 
-export function markAllNodesAsDirty(editor: LexicalEditor, type: string): void {
-  // Mark all existing text nodes as dirty
-  updateEditor(
-    editor,
+export function markNodesWithTypesAsDirty(
+  editor: LexicalEditor,
+  types: string[],
+): void {
+  // We only need to mark nodes dirty if they were in the previous state.
+  // If they aren't, then they are by definition dirty already.
+  const cachedMap = getCachedTypeToNodeMap(editor.getEditorState());
+  const dirtyNodeMaps: NodeMap[] = [];
+  for (const type of types) {
+    const nodeMap = cachedMap.get(type);
+    if (nodeMap) {
+      // By construction these are non-empty
+      dirtyNodeMaps.push(nodeMap);
+    }
+  }
+  // Nothing to mark dirty, no update necessary
+  if (dirtyNodeMaps.length === 0) {
+    return;
+  }
+  editor.update(
     () => {
-      const editorState = getActiveEditorState();
-      if (editorState.isEmpty()) {
-        return;
-      }
-      if (type === 'root') {
-        $getRoot().markDirty();
-        return;
-      }
-      const nodeMap = editorState._nodeMap;
-      for (const [, node] of nodeMap) {
-        node.markDirty();
+      for (const nodeMap of dirtyNodeMaps) {
+        for (const nodeKey of nodeMap.keys()) {
+          // We are only concerned with nodes that are still in the latest NodeMap,
+          // if they no longer exist then markDirty would raise an exception
+          const latest = $getNodeByKey(nodeKey);
+          if (latest) {
+            latest.markDirty();
+          }
+        }
       }
     },
     editor._pendingEditorState === null
       ? {
-          tag: 'history-merge',
+          tag: HISTORY_MERGE_TAG,
         }
       : undefined,
   );
@@ -520,12 +591,12 @@ export function $setSelection(selection: null | BaseSelection): void {
 export function $flushMutations(): void {
   errorOnReadOnly();
   const editor = getActiveEditor();
-  $flushRootMutations(editor);
+  flushRootMutations(editor);
 }
 
 export function $getNodeFromDOM(dom: Node): null | LexicalNode {
   const editor = getActiveEditor();
-  const nodeKey = getNodeKeyFromDOM(dom, editor);
+  const nodeKey = getNodeKeyFromDOMTree(dom, editor);
   if (nodeKey === null) {
     const rootElement = editor.getRootElement();
     if (dom === rootElement) {
@@ -543,15 +614,14 @@ export function getTextNodeOffset(
   return moveSelectionToEnd ? node.getTextContentSize() : 0;
 }
 
-function getNodeKeyFromDOM(
+function getNodeKeyFromDOMTree(
   // Note that node here refers to a DOM Node, not an Lexical Node
   dom: Node,
   editor: LexicalEditor,
 ): NodeKey | null {
   let node: Node | null = dom;
   while (node != null) {
-    // @ts-ignore We intentionally add this to the Node.
-    const key: NodeKey = node[`__lexicalKey_${editor._key}`];
+    const key = getNodeKeyFromDOMNode(node, editor);
     if (key !== undefined) {
       return key;
     }
@@ -560,7 +630,13 @@ function getNodeKeyFromDOM(
   return null;
 }
 
-export function doesContainGrapheme(str: string): boolean {
+/**
+ * Return true if `str` contains any valid surrogate pair.
+ *
+ * See also $updateCaretSelectionForUnicodeCharacter for
+ * a discussion on when and why this is useful.
+ */
+export function doesContainSurrogatePair(str: string): boolean {
   return /[\uD800-\uDBFF][\uDC00-\uDFFF]/g.test(str);
 }
 
@@ -580,14 +656,11 @@ export function createUID(): string {
   return Math.random()
     .toString(36)
     .replace(/[^a-z]+/g, '')
-    .substr(0, 5);
+    .substring(0, 5);
 }
 
 export function getAnchorTextFromDOM(anchorNode: Node): null | string {
-  if (anchorNode.nodeType === DOM_TEXT_TYPE) {
-    return anchorNode.nodeValue;
-  }
-  return null;
+  return isDOMTextNode(anchorNode) ? anchorNode.nodeValue : null;
 }
 
 export function $updateSelectedTextFromDOM(
@@ -596,7 +669,7 @@ export function $updateSelectedTextFromDOM(
   data?: string,
 ): void {
   // Update the text content with the latest composition text
-  const domSelection = getDOMSelection(editor._window);
+  const domSelection = getDOMSelection(getWindow(editor));
   if (domSelection === null) {
     return;
   }
@@ -762,263 +835,217 @@ export function $shouldInsertTextAfterOrBeforeTextNode(
   }
 }
 
-export function isTab(
-  key: string,
-  altKey: boolean,
-  ctrlKey: boolean,
-  metaKey: boolean,
+/**
+ * A KeyboardEvent or structurally similar object with a string `key` as well
+ * as `altKey`, `ctrlKey`, `metaKey`, and `shiftKey` boolean properties.
+ */
+export type KeyboardEventModifiers = Pick<
+  KeyboardEvent,
+  'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'
+>;
+
+/**
+ * A record of keyboard modifiers that must be enabled.
+ * If the value is `'any'` then the modifier key's state is ignored.
+ * If the value is `true` then the modifier key must be pressed.
+ * If the value is `false` or the property is omitted then the modifier key must
+ * not be pressed.
+ */
+export type KeyboardEventModifierMask = {
+  [K in Exclude<keyof KeyboardEventModifiers, 'key'>]?:
+    | boolean
+    | undefined
+    | 'any';
+};
+
+function matchModifier(
+  event: KeyboardEventModifiers,
+  mask: KeyboardEventModifierMask,
+  prop: keyof KeyboardEventModifierMask,
 ): boolean {
-  return key === 'Tab' && !altKey && !ctrlKey && !metaKey;
+  const expected = mask[prop] || false;
+  return expected === 'any' || expected === event[prop];
 }
 
-export function isBold(
-  key: string,
-  altKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
+/**
+ * Match a KeyboardEvent with its expected modifier state
+ *
+ * @param event A KeyboardEvent, or structurally similar object
+ * @param mask An object specifying the expected state of the modifiers
+ * @returns true if the event matches
+ */
+export function isModifierMatch(
+  event: KeyboardEventModifiers,
+  mask: KeyboardEventModifierMask,
 ): boolean {
   return (
-    key.toLowerCase() === 'b' && !altKey && controlOrMeta(metaKey, ctrlKey)
+    matchModifier(event, mask, 'altKey') &&
+    matchModifier(event, mask, 'ctrlKey') &&
+    matchModifier(event, mask, 'shiftKey') &&
+    matchModifier(event, mask, 'metaKey')
   );
 }
 
-export function isItalic(
-  key: string,
-  altKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
+/**
+ * Match a KeyboardEvent with its expected state
+ *
+ * @param event A KeyboardEvent, or structurally similar object
+ * @param expectedKey The string to compare with event.key (case insensitive)
+ * @param mask An object specifying the expected state of the modifiers
+ * @returns true if the event matches
+ */
+export function isExactShortcutMatch(
+  event: KeyboardEventModifiers,
+  expectedKey: string,
+  mask: KeyboardEventModifierMask,
 ): boolean {
   return (
-    key.toLowerCase() === 'i' && !altKey && controlOrMeta(metaKey, ctrlKey)
+    isModifierMatch(event, mask) &&
+    event.key.toLowerCase() === expectedKey.toLowerCase()
   );
 }
 
-export function isUnderline(
-  key: string,
-  altKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  return (
-    key.toLowerCase() === 'u' && !altKey && controlOrMeta(metaKey, ctrlKey)
-  );
+const CONTROL_OR_META = {ctrlKey: !IS_APPLE, metaKey: IS_APPLE};
+const CONTROL_OR_ALT = {altKey: IS_APPLE, ctrlKey: !IS_APPLE};
+
+export function isTab(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'Tab', {
+    shiftKey: 'any',
+  });
 }
 
-export function isParagraph(key: string, shiftKey: boolean): boolean {
-  return isReturn(key) && !shiftKey;
+export function isBold(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'b', CONTROL_OR_META);
 }
 
-export function isLineBreak(key: string, shiftKey: boolean): boolean {
-  return isReturn(key) && shiftKey;
+export function isItalic(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'i', CONTROL_OR_META);
+}
+
+export function isUnderline(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'u', CONTROL_OR_META);
+}
+
+export function isParagraph(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'Enter', {
+    altKey: 'any',
+    ctrlKey: 'any',
+    metaKey: 'any',
+  });
+}
+
+export function isLineBreak(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'Enter', {
+    altKey: 'any',
+    ctrlKey: 'any',
+    metaKey: 'any',
+    shiftKey: true,
+  });
 }
 
 // Inserts a new line after the selection
 
-export function isOpenLineBreak(key: string, ctrlKey: boolean): boolean {
+export function isOpenLineBreak(event: KeyboardEventModifiers): boolean {
   // 79 = KeyO
-  return IS_APPLE && ctrlKey && key.toLowerCase() === 'o';
+  return IS_APPLE && isExactShortcutMatch(event, 'o', {ctrlKey: true});
 }
 
-export function isDeleteWordBackward(
-  key: string,
-  altKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  return isBackspace(key) && (IS_APPLE ? altKey : ctrlKey);
+export function isDeleteWordBackward(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'Backspace', CONTROL_OR_ALT);
 }
 
-export function isDeleteWordForward(
-  key: string,
-  altKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  return isDelete(key) && (IS_APPLE ? altKey : ctrlKey);
+export function isDeleteWordForward(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'Delete', CONTROL_OR_ALT);
 }
 
-export function isDeleteLineBackward(key: string, metaKey: boolean): boolean {
-  return IS_APPLE && metaKey && isBackspace(key);
+export function isDeleteLineBackward(event: KeyboardEventModifiers): boolean {
+  return IS_APPLE && isExactShortcutMatch(event, 'Backspace', {metaKey: true});
 }
 
-export function isDeleteLineForward(key: string, metaKey: boolean): boolean {
-  return IS_APPLE && metaKey && isDelete(key);
-}
-
-export function isDeleteBackward(
-  key: string,
-  altKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  if (IS_APPLE) {
-    if (altKey || metaKey) {
-      return false;
-    }
-    return isBackspace(key) || (key.toLowerCase() === 'h' && ctrlKey);
-  }
-  if (ctrlKey || altKey || metaKey) {
-    return false;
-  }
-  return isBackspace(key);
-}
-
-export function isDeleteForward(
-  key: string,
-  ctrlKey: boolean,
-  shiftKey: boolean,
-  altKey: boolean,
-  metaKey: boolean,
-): boolean {
-  if (IS_APPLE) {
-    if (shiftKey || altKey || metaKey) {
-      return false;
-    }
-    return isDelete(key) || (key.toLowerCase() === 'd' && ctrlKey);
-  }
-  if (ctrlKey || altKey || metaKey) {
-    return false;
-  }
-  return isDelete(key);
-}
-
-export function isUndo(
-  key: string,
-  shiftKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
+export function isDeleteLineForward(event: KeyboardEventModifiers): boolean {
   return (
-    key.toLowerCase() === 'z' && !shiftKey && controlOrMeta(metaKey, ctrlKey)
+    IS_APPLE &&
+    (isExactShortcutMatch(event, 'Delete', {metaKey: true}) ||
+      isExactShortcutMatch(event, 'k', {ctrlKey: true}))
   );
 }
 
-export function isRedo(
-  key: string,
-  shiftKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  if (IS_APPLE) {
-    return key.toLowerCase() === 'z' && metaKey && shiftKey;
-  }
+export function isDeleteBackward(event: KeyboardEventModifiers): boolean {
   return (
-    (key.toLowerCase() === 'y' && ctrlKey) ||
-    (key.toLowerCase() === 'z' && ctrlKey && shiftKey)
+    isExactShortcutMatch(event, 'Backspace', {shiftKey: 'any'}) ||
+    (IS_APPLE && isExactShortcutMatch(event, 'h', {ctrlKey: true}))
   );
 }
 
-export function isCopy(
-  key: string,
-  shiftKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  if (shiftKey) {
-    return false;
+export function isDeleteForward(event: KeyboardEventModifiers): boolean {
+  return (
+    isExactShortcutMatch(event, 'Delete', {}) ||
+    (IS_APPLE && isExactShortcutMatch(event, 'd', {ctrlKey: true}))
+  );
+}
+
+export function isUndo(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'z', CONTROL_OR_META);
+}
+
+export function isRedo(event: KeyboardEventModifiers): boolean {
+  if (IS_APPLE) {
+    return isExactShortcutMatch(event, 'z', {metaKey: true, shiftKey: true});
   }
-  if (key.toLowerCase() === 'c') {
-    return IS_APPLE ? metaKey : ctrlKey;
-  }
-
-  return false;
+  return (
+    isExactShortcutMatch(event, 'y', {ctrlKey: true}) ||
+    isExactShortcutMatch(event, 'z', {ctrlKey: true, shiftKey: true})
+  );
 }
 
-export function isCut(
-  key: string,
-  shiftKey: boolean,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  if (shiftKey) {
-    return false;
-  }
-  if (key.toLowerCase() === 'x') {
-    return IS_APPLE ? metaKey : ctrlKey;
-  }
-
-  return false;
+export function isCopy(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'c', CONTROL_OR_META);
 }
 
-function isArrowLeft(key: string): boolean {
-  return key === 'ArrowLeft';
+export function isCut(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'x', CONTROL_OR_META);
 }
 
-function isArrowRight(key: string): boolean {
-  return key === 'ArrowRight';
+export function isMoveBackward(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'ArrowLeft', {
+    shiftKey: 'any',
+  });
 }
 
-function isArrowUp(key: string): boolean {
-  return key === 'ArrowUp';
+export function isMoveToStart(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'ArrowLeft', CONTROL_OR_META);
 }
 
-function isArrowDown(key: string): boolean {
-  return key === 'ArrowDown';
+export function isMoveForward(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'ArrowRight', {
+    shiftKey: 'any',
+  });
 }
 
-export function isMoveBackward(
-  key: string,
-  ctrlKey: boolean,
-  altKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return isArrowLeft(key) && !ctrlKey && !metaKey && !altKey;
+export function isMoveToEnd(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'ArrowRight', CONTROL_OR_META);
 }
 
-export function isMoveToStart(
-  key: string,
-  ctrlKey: boolean,
-  shiftKey: boolean,
-  altKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return isArrowLeft(key) && !altKey && !shiftKey && (ctrlKey || metaKey);
+export function isMoveUp(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'ArrowUp', {
+    altKey: 'any',
+    shiftKey: 'any',
+  });
 }
 
-export function isMoveForward(
-  key: string,
-  ctrlKey: boolean,
-  altKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return isArrowRight(key) && !ctrlKey && !metaKey && !altKey;
+export function isMoveDown(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'ArrowDown', {
+    altKey: 'any',
+    shiftKey: 'any',
+  });
 }
 
-export function isMoveToEnd(
-  key: string,
-  ctrlKey: boolean,
-  shiftKey: boolean,
-  altKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return isArrowRight(key) && !altKey && !shiftKey && (ctrlKey || metaKey);
+export function isModifier(event: KeyboardEventModifiers): boolean {
+  return event.ctrlKey || event.shiftKey || event.altKey || event.metaKey;
 }
 
-export function isMoveUp(
-  key: string,
-  ctrlKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return isArrowUp(key) && !ctrlKey && !metaKey;
-}
-
-export function isMoveDown(
-  key: string,
-  ctrlKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return isArrowDown(key) && !ctrlKey && !metaKey;
-}
-
-export function isModifier(
-  ctrlKey: boolean,
-  shiftKey: boolean,
-  altKey: boolean,
-  metaKey: boolean,
-): boolean {
-  return ctrlKey || shiftKey || altKey || metaKey;
-}
-
-export function isSpace(key: string): boolean {
-  return key === ' ';
+export function isSpace(event: KeyboardEventModifiers): boolean {
+  return event.key === ' ';
 }
 
 export function controlOrMeta(metaKey: boolean, ctrlKey: boolean): boolean {
@@ -1028,34 +1055,41 @@ export function controlOrMeta(metaKey: boolean, ctrlKey: boolean): boolean {
   return ctrlKey;
 }
 
-export function isReturn(key: string): boolean {
-  return key === 'Enter';
+export function isBackspace(event: KeyboardEventModifiers): boolean {
+  return event.key === 'Backspace';
 }
 
-export function isBackspace(key: string): boolean {
-  return key === 'Backspace';
+export function isEscape(event: KeyboardEventModifiers): boolean {
+  return event.key === 'Escape';
 }
 
-export function isEscape(key: string): boolean {
-  return key === 'Escape';
+export function isDelete(event: KeyboardEventModifiers): boolean {
+  return event.key === 'Delete';
 }
 
-export function isDelete(key: string): boolean {
-  return key === 'Delete';
+export function isSelectAll(event: KeyboardEventModifiers): boolean {
+  return isExactShortcutMatch(event, 'a', CONTROL_OR_META);
 }
 
-export function isSelectAll(
-  key: string,
-  metaKey: boolean,
-  ctrlKey: boolean,
-): boolean {
-  return key.toLowerCase() === 'a' && controlOrMeta(metaKey, ctrlKey);
-}
-
-export function $selectAll(): void {
+export function $selectAll(selection?: RangeSelection | null): RangeSelection {
   const root = $getRoot();
-  const selection = root.select(0, root.getChildrenSize());
-  $setSelection($normalizeSelection(selection));
+
+  if ($isRangeSelection(selection)) {
+    const anchor = selection.anchor;
+    const focus = selection.focus;
+    const anchorNode = anchor.getNode();
+    const topParent = anchorNode.getTopLevelElementOrThrow();
+    const rootNode = topParent.getParentOrThrow();
+    anchor.set(rootNode.getKey(), 0, 'element');
+    focus.set(rootNode.getKey(), rootNode.getChildrenSize(), 'element');
+    $normalizeSelection(selection);
+    return selection;
+  } else {
+    // Create a new RangeSelection
+    const newSelection = root.select(0, root.getChildrenSize());
+    $setSelection($normalizeSelection(newSelection));
+    return newSelection;
+  }
 }
 
 export function getCachedClassNameArray(
@@ -1116,7 +1150,9 @@ export function setMutatedNode(
     mutatedNodesByType.set(nodeKey, isMove ? 'updated' : mutation);
   }
 }
-
+/**
+ * @deprecated Use {@link LexicalEditor.registerMutationListener} with `skipInitialization: false` instead.
+ */
 export function $nodesOfType<T extends LexicalNode>(klass: Klass<T>): Array<T> {
   const klassType = klass.getType();
   const editorState = getActiveEditorState();
@@ -1124,7 +1160,7 @@ export function $nodesOfType<T extends LexicalNode>(klass: Klass<T>): Array<T> {
     const nodes = getCachedTypeToNodeMap(editorState).get(klassType) as
       | undefined
       | Map<string, T>;
-    return nodes ? [...nodes.values()] : [];
+    return nodes ? Array.from(nodes.values()) : [];
   }
   const nodes = editorState._nodeMap;
   const nodesOfType: Array<T> = [];
@@ -1233,9 +1269,19 @@ export function getElementByKeyOrThrow(
 export function getParentElement(node: Node): HTMLElement | null {
   const parentElement =
     (node as HTMLSlotElement).assignedSlot || node.parentElement;
-  return parentElement !== null && parentElement.nodeType === 11
+  return isDocumentFragment(parentElement)
     ? ((parentElement as unknown as ShadowRoot).host as HTMLElement)
     : parentElement;
+}
+
+export function getDOMOwnerDocument(
+  target: EventTarget | null,
+): Document | null {
+  return isDOMDocumentNode(target)
+    ? target
+    : isHTMLElement(target)
+    ? target.ownerDocument
+    : null;
 }
 
 export function scrollIntoViewIfNeeded(
@@ -1243,10 +1289,10 @@ export function scrollIntoViewIfNeeded(
   selectionRect: DOMRect,
   rootElement: HTMLElement,
 ): void {
-  const doc = rootElement.ownerDocument;
-  const defaultView = doc.defaultView;
+  const doc = getDOMOwnerDocument(rootElement);
+  const defaultView = getDefaultView(doc);
 
-  if (defaultView === null) {
+  if (doc === null || defaultView === null) {
     return;
   }
   let {top: currentTop, bottom: currentBottom} = selectionRect;
@@ -1291,15 +1337,28 @@ export function scrollIntoViewIfNeeded(
   }
 }
 
-export function $hasUpdateTag(tag: string): boolean {
+export function $hasUpdateTag(tag: UpdateTag): boolean {
   const editor = getActiveEditor();
   return editor._updateTags.has(tag);
 }
 
-export function $addUpdateTag(tag: string): void {
+export function $addUpdateTag(tag: UpdateTag): void {
   errorOnReadOnly();
   const editor = getActiveEditor();
   editor._updateTags.add(tag);
+}
+
+/**
+ * Add a function to run after the current update. This will run after any
+ * `onUpdate` function already supplied to `editor.update()`, as well as any
+ * functions added with previous calls to `$onUpdate`.
+ *
+ * @param updateFn The function to run after the current update.
+ */
+export function $onUpdate(updateFn: () => void): void {
+  errorOnReadOnly();
+  const editor = getActiveEditor();
+  editor._deferred.push(updateFn);
 }
 
 export function $maybeMoveChildrenSelectionToParent(
@@ -1335,9 +1394,9 @@ export function $hasAncestor(
   return false;
 }
 
-export function getDefaultView(domElem: HTMLElement): Window | null {
-  const ownerDoc = domElem.ownerDocument;
-  return (ownerDoc && ownerDoc.defaultView) || null;
+export function getDefaultView(domElem: EventTarget | null): Window | null {
+  const ownerDoc = getDOMOwnerDocument(domElem);
+  return ownerDoc ? ownerDoc.defaultView : null;
 }
 
 export function getWindow(editor: LexicalEditor): Window {
@@ -1381,37 +1440,65 @@ export function $isRootOrShadowRoot(
   return $isRootNode(node) || ($isElementNode(node) && node.isShadowRoot());
 }
 
+/**
+ * Returns a shallow clone of node with a new key
+ *
+ * @param node - The node to be copied.
+ * @returns The copy of the node.
+ */
 export function $copyNode<T extends LexicalNode>(node: T): T {
-  const copy = node.constructor.clone(node);
+  const copy = node.constructor.clone(node) as T;
   $setNodeKey(copy, null);
-  // @ts-expect-error
   return copy;
 }
 
-export function $applyNodeReplacement<N extends LexicalNode>(
-  node: LexicalNode,
-): N {
+export function $applyNodeReplacement<N extends LexicalNode>(node: N): N {
   const editor = getActiveEditor();
   const nodeType = node.constructor.getType();
   const registeredNode = editor._nodes.get(nodeType);
-  if (registeredNode === undefined) {
-    invariant(
-      false,
-      '$initializeNode failed. Ensure node has been registered to the editor. You can do this by passing the node class via the "nodes" array in the editor config.',
-    );
-  }
-  const replaceFunc = registeredNode.replace;
-  if (replaceFunc !== null) {
-    const replacementNode = replaceFunc(node) as N;
-    if (!(replacementNode instanceof node.constructor)) {
+  invariant(
+    registeredNode !== undefined,
+    '$applyNodeReplacement node %s with type %s must be registered to the editor. You can do this by passing the node class via the "nodes" array in the editor config.',
+    node.constructor.name,
+    nodeType,
+  );
+  const {replace, replaceWithKlass} = registeredNode;
+  if (replace !== null) {
+    const replacementNode = replace(node);
+    const replacementNodeKlass = replacementNode.constructor;
+    if (replaceWithKlass !== null) {
       invariant(
-        false,
-        '$initializeNode failed. Ensure replacement node is a subclass of the original node.',
+        replacementNode instanceof replaceWithKlass,
+        '$applyNodeReplacement failed. Expected replacement node to be an instance of %s with type %s but returned %s with type %s from original node %s with type %s',
+        replaceWithKlass.name,
+        replaceWithKlass.getType(),
+        replacementNodeKlass.name,
+        replacementNodeKlass.getType(),
+        node.constructor.name,
+        nodeType,
+      );
+    } else {
+      invariant(
+        replacementNode instanceof node.constructor &&
+          replacementNodeKlass !== node.constructor,
+        '$applyNodeReplacement failed. Ensure replacement node %s with type %s is a subclass of the original node %s with type %s.',
+        replacementNodeKlass.name,
+        replacementNodeKlass.getType(),
+        node.constructor.name,
+        nodeType,
       );
     }
-    return replacementNode;
+    invariant(
+      replacementNode.__key !== node.__key,
+      '$applyNodeReplacement failed. Ensure that the key argument is *not* used in your replace function (from node %s with type %s to node %s with type %s), Node keys must never be re-used except by the static clone method.',
+      node.constructor.name,
+      nodeType,
+      replacementNodeKlass.name,
+      replacementNodeKlass.getType(),
+    );
+    return replacementNode as N;
   }
-  return node as N;
+  return node;
 }
 
 export function errorOnInsertTextNodeOnRoot(
@@ -1509,13 +1596,11 @@ export function updateDOMBlockCursorElement(
       }
     } else {
       const child = elementNode.getChildAtIndex(offset);
-      if (needsBlockCursor(child)) {
-        const sibling = (child as LexicalNode).getPreviousSibling();
+      if (child !== null && needsBlockCursor(child)) {
+        const sibling = child.getPreviousSibling();
         if (sibling === null || needsBlockCursor(sibling)) {
           isBlockCursor = true;
-          insertBeforeElement = editor.getElementByKey(
-            (child as LexicalNode).__key,
-          );
+          insertBeforeElement = editor.getElementByKey(child.__key);
         }
       }
     }
@@ -1542,8 +1627,28 @@ export function updateDOMBlockCursorElement(
   }
 }
 
+/**
+ * Returns the selection for the given window, or the global window if null.
+ * Will return null if {@link CAN_USE_DOM} is false.
+ *
+ * @param targetWindow The window to get the selection from
+ * @returns a Selection or null
+ */
 export function getDOMSelection(targetWindow: null | Window): null | Selection {
   return !CAN_USE_DOM ? null : (targetWindow || window).getSelection();
+}
+
+/**
+ * Returns the selection for the defaultView of the ownerDocument of given EventTarget.
+ *
+ * @param eventTarget The node to get the selection from
+ * @returns a Selection or null
+ */
+export function getDOMSelectionFromTarget(
+  eventTarget: null | EventTarget,
+): null | Selection {
+  const defaultView = getDefaultView(eventTarget);
+  return defaultView ? defaultView.getSelection() : null;
 }
 
 export function $splitNode(
@@ -1615,17 +1720,37 @@ export function $findMatchingParent(
  * @param x - The element being tested
  * @returns Returns true if x is an HTML anchor tag, false otherwise
  */
-export function isHTMLAnchorElement(x: Node): x is HTMLAnchorElement {
+export function isHTMLAnchorElement(x: unknown): x is HTMLAnchorElement {
   return isHTMLElement(x) && x.tagName === 'A';
 }
 
 /**
- * @param x - The element being testing
+ * @param x - The element being tested
  * @returns Returns true if x is an HTML element, false otherwise.
  */
-export function isHTMLElement(x: Node | EventTarget): x is HTMLElement {
-  // @ts-ignore-next-line - strict check on nodeType here should filter out non-Element EventTarget implementors
-  return x.nodeType === 1;
+export function isHTMLElement(x: unknown): x is HTMLElement {
+  return isDOMNode(x) && x.nodeType === DOM_ELEMENT_TYPE;
+}
+
+/**
+ * @param x - The element being tested
+ * @returns Returns true if x is a DOM Node, false otherwise.
+ */
+export function isDOMNode(x: unknown): x is Node {
+  return (
+    typeof x === 'object' &&
+    x !== null &&
+    'nodeType' in x &&
+    typeof x.nodeType === 'number'
+  );
+}
+
+/**
+ * @param x - The element being testing
+ * @returns Returns true if x is a document fragment, false otherwise.
+ */
+export function isDocumentFragment(x: unknown): x is DocumentFragment {
+  return isDOMNode(x) && x.nodeType === DOM_DOCUMENT_FRAGMENT_TYPE;
 }
 
 /**
@@ -1635,7 +1760,7 @@ export function isHTMLElement(x: Node | EventTarget): x is HTMLElement {
  */
 export function isInlineDomNode(node: Node) {
   const inlineNodes = new RegExp(
-    /^(a|abbr|acronym|b|cite|code|del|em|i|ins|kbd|label|output|q|ruby|s|samp|span|strong|sub|sup|time|u|tt|var|#text)$/,
+    /^(a|abbr|acronym|b|cite|code|del|em|i|ins|kbd|label|mark|output|q|ruby|s|samp|span|strong|sub|sup|time|u|tt|var|#text)$/,
     'i',
   );
   return node.nodeName.match(inlineNodes) !== null;
@@ -1655,13 +1780,22 @@ export function isBlockDomNode(node: Node) {
 }
 
 /**
+ * @internal
+ *
  * This function is for internal use of the library.
  * Please do not use it as it may change in the future.
+ *
+ * This function returns true for a DecoratorNode that is not inline OR
+ * an ElementNode that is:
+ * - not a root or shadow root
+ * - not inline
+ * - can't be empty
+ * - has no children or an inline first child
  */
 export function INTERNAL_$isBlock(
   node: LexicalNode,
 ): node is ElementNode | DecoratorNode<unknown> {
-  if ($isRootNode(node) || ($isDecoratorNode(node) && !node.isInline())) {
+  if ($isDecoratorNode(node) && !node.isInline()) {
     return true;
   }
   if (!$isElementNode(node) || $isRootOrShadowRoot(node)) {
@@ -1681,7 +1815,7 @@ export function INTERNAL_$isBlock(
 export function $getAncestor<NodeType extends LexicalNode = LexicalNode>(
   node: LexicalNode,
   predicate: (ancestor: LexicalNode) => ancestor is NodeType,
-) {
+): NodeType | null {
   let parent = node;
   while (parent !== null && parent.getParent() !== null && !predicate(parent)) {
     parent = parent.getParentOrThrow();
@@ -1704,26 +1838,107 @@ export type TypeToNodeMap = Map<string, NodeMap>;
  * Compute a cached Map of node type to nodes for a frozen EditorState
  */
 const cachedNodeMaps = new WeakMap<EditorState, TypeToNodeMap>();
+const EMPTY_TYPE_TO_NODE_MAP: TypeToNodeMap = new Map();
 export function getCachedTypeToNodeMap(
   editorState: EditorState,
 ): TypeToNodeMap {
+  // If this is a new Editor it may have a writable this._editorState
+  // with only a 'root' entry.
+  if (!editorState._readOnly && editorState.isEmpty()) {
+    return EMPTY_TYPE_TO_NODE_MAP;
+  }
   invariant(
     editorState._readOnly,
     'getCachedTypeToNodeMap called with a writable EditorState',
   );
   let typeToNodeMap = cachedNodeMaps.get(editorState);
   if (!typeToNodeMap) {
-    typeToNodeMap = new Map();
+    typeToNodeMap = computeTypeToNodeMap(editorState);
     cachedNodeMaps.set(editorState, typeToNodeMap);
-    for (const [nodeKey, node] of editorState._nodeMap) {
-      const nodeType = node.__type;
-      let nodeMap = typeToNodeMap.get(nodeType);
-      if (!nodeMap) {
-        nodeMap = new Map();
-        typeToNodeMap.set(nodeType, nodeMap);
-      }
-      nodeMap.set(nodeKey, node);
-    }
   }
   return typeToNodeMap;
+}
+
+/**
+ * @internal
+ * Compute a Map of node type to nodes for an EditorState
+ */
+function computeTypeToNodeMap(editorState: EditorState): TypeToNodeMap {
+  const typeToNodeMap = new Map();
+  for (const [nodeKey, node] of editorState._nodeMap) {
+    const nodeType = node.__type;
+    let nodeMap = typeToNodeMap.get(nodeType);
+    if (!nodeMap) {
+      nodeMap = new Map();
+      typeToNodeMap.set(nodeType, nodeMap);
+    }
+    nodeMap.set(nodeKey, node);
+  }
+  return typeToNodeMap;
+}
+
+/**
+ * Returns a clone of a node using `node.constructor.clone()` followed by
+ * `clone.afterCloneFrom(node)`. The resulting clone must have the same key,
+ * parent/next/prev pointers, and other properties that are not set by
+ * `node.constructor.clone` (format, style, etc.). This is primarily used by
+ * {@link LexicalNode.getWritable} to create a writable version of an
+ * existing node. The clone is the same logical node as the original node,
+ * do not try and use this function to duplicate or copy an existing node.
+ *
+ * Does not mutate the EditorState.
+ * @param node - The node to be cloned.
+ * @returns The clone of the node.
+ */
+export function $cloneWithProperties<T extends LexicalNode>(latestNode: T): T {
+  const constructor = latestNode.constructor;
+  const mutableNode = constructor.clone(latestNode) as T;
+  mutableNode.afterCloneFrom(latestNode);
+  if (__DEV__) {
+    invariant(
+      mutableNode.__key === latestNode.__key,
+      "$cloneWithProperties: %s.clone(node) (with type '%s') did not return a node with the same key, make sure to specify node.__key as the last argument to the constructor",
+      constructor.name,
+      constructor.getType(),
+    );
+    invariant(
+      mutableNode.__parent === latestNode.__parent &&
+        mutableNode.__next === latestNode.__next &&
+        mutableNode.__prev === latestNode.__prev,
+      "$cloneWithProperties: %s.clone(node) (with type '%s') overrode afterCloneFrom but did not call super.afterCloneFrom(prevNode)",
+      constructor.name,
+      constructor.getType(),
+    );
+  }
+  return mutableNode;
+}
+
+export function setNodeIndentFromDOM(
+  elementDom: HTMLElement,
+  elementNode: ElementNode,
+) {
+  const indentSize = parseInt(elementDom.style.paddingInlineStart, 10) || 0;
+  const indent = Math.round(indentSize / 40);
+  elementNode.setIndent(indent);
+}
+
+/**
+ * @internal
+ *
+ * Mark this node as unmanaged by lexical's mutation observer like
+ * decorator nodes
+ */
+export function setDOMUnmanaged(elementDom: HTMLElement): void {
+  const el: HTMLElement & LexicalPrivateDOM = elementDom;
+  el.__lexicalUnmanaged = true;
+}
+
+/**
+ * @internal
+ *
+ * True if this DOM node was marked with {@link setDOMUnmanaged}
+ */
+export function isDOMUnmanaged(elementDom: Node): boolean {
+  const el: Node & LexicalPrivateDOM = elementDom;
+  return el.__lexicalUnmanaged === true;
 }

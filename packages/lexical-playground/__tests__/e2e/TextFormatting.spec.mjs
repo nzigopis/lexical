@@ -13,8 +13,11 @@ import {
   moveToLineEnd,
   selectCharacters,
   toggleBold,
+  toggleCapitalize,
   toggleItalic,
+  toggleLowercase,
   toggleUnderline,
+  toggleUppercase,
 } from '../keyboardShortcuts/index.mjs';
 import {
   assertHTML,
@@ -425,6 +428,145 @@ test.describe.parallel('TextFormatting', () => {
       anchorPath: [0, 1, 0],
       focusOffset: 0,
       focusPath: [0, 1, 0],
+    });
+  });
+
+  const capitalizationFormats = [
+    {
+      applyCapitalization: toggleLowercase,
+      className: 'PlaygroundEditorTheme__textLowercase',
+      format: 'lowercase',
+    },
+    {
+      applyCapitalization: toggleUppercase,
+      className: 'PlaygroundEditorTheme__textUppercase',
+      format: 'uppercase',
+    },
+    {
+      applyCapitalization: toggleCapitalize,
+      className: 'PlaygroundEditorTheme__textCapitalize',
+      format: 'capitalize',
+    },
+  ];
+
+  capitalizationFormats.forEach(({className, format, applyCapitalization}) => {
+    test(`Can select text and change it to ${format}`, async ({
+      page,
+      isPlainText,
+    }) => {
+      test.skip(isPlainText);
+
+      await focusEditor(page);
+      await page.keyboard.type('Hello world!');
+      await moveLeft(page);
+      await selectCharacters(page, 'left', 5);
+
+      await assertSelection(page, {
+        anchorOffset: 11,
+        anchorPath: [0, 0, 0],
+        focusOffset: 6,
+        focusPath: [0, 0, 0],
+      });
+
+      await applyCapitalization(page);
+      await assertHTML(
+        page,
+        html`
+          <p
+            class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+            dir="ltr">
+            <span data-lexical-text="true">Hello</span>
+            <span class="${className}" data-lexical-text="true">world</span>
+            <span data-lexical-text="true">!</span>
+          </p>
+        `,
+      );
+
+      await assertSelection(page, {
+        anchorOffset: 5,
+        anchorPath: [0, 1, 0],
+        focusOffset: 0,
+        focusPath: [0, 1, 0],
+      });
+    });
+  });
+
+  const capitalizationResettingTestCases = [
+    {
+      expectedFinalHTML: html`
+        <p
+          class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+          dir="ltr">
+          <span class="$formatClassName" data-lexical-text="true">Hello</span>
+          <span data-lexical-text="true">world!</span>
+        </p>
+      `,
+      key: 'Space',
+    },
+    {
+      expectedFinalHTML: html`
+        <p
+          class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+          dir="ltr">
+          <span class="$formatClassName" data-lexical-text="true">Hello</span>
+          <span
+            class="PlaygroundEditorTheme__tabNode"
+            data-lexical-text="true"></span>
+          <span data-lexical-text="true">world!</span>
+        </p>
+      `,
+      key: 'Tab',
+    },
+    {
+      expectedFinalHTML: html`
+        <p
+          class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+          dir="ltr">
+          <span class="$formatClassName" data-lexical-text="true">Hello</span>
+        </p>
+        <p
+          class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+          dir="ltr">
+          <span data-lexical-text="true">world!</span>
+        </p>
+      `,
+      key: 'Enter',
+    },
+  ];
+
+  capitalizationFormats.forEach(({format, className, applyCapitalization}) => {
+    capitalizationResettingTestCases.forEach(({key, expectedFinalHTML}) => {
+      test(`Pressing ${key} resets ${format} format`, async ({
+        page,
+        isPlainText,
+      }) => {
+        test.skip(isPlainText);
+
+        await focusEditor(page);
+
+        await applyCapitalization(page);
+        await page.keyboard.type('Hello');
+
+        await assertHTML(
+          page,
+          html`
+            <p
+              class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+              dir="ltr">
+              <span class="${className}" data-lexical-text="true">Hello</span>
+            </p>
+          `,
+        );
+
+        // Pressing the key should reset the format
+        await page.keyboard.press(key);
+        await page.keyboard.type(' world!');
+
+        await assertHTML(
+          page,
+          expectedFinalHTML.replace('$formatClassName', className),
+        );
+      });
     });
   });
 
@@ -1111,23 +1253,48 @@ test.describe.parallel('TextFormatting', () => {
     expect(isButtonActiveStatusDisplayedCorrectly).toBe(true);
   });
 
-  test('Regression #2523: can toggle format when selecting a TextNode edge followed by a non TextNode; ', async ({
-    page,
-    isCollab,
-    isPlainText,
-  }) => {
-    test.skip(isPlainText);
-    await focusEditor(page);
+  test(
+    'Regression #2523: can toggle format when selecting a TextNode edge followed by a non TextNode; ',
+    {tag: '@flaky'},
+    async ({page, isCollab, isPlainText}) => {
+      test.skip(isPlainText);
+      await focusEditor(page);
 
-    await page.keyboard.type('A');
-    await insertSampleImage(page);
-    await page.keyboard.type('BC');
+      await page.keyboard.type('A');
+      await insertSampleImage(page);
+      await page.keyboard.type('BC');
 
-    await moveLeft(page, 1);
-    await selectCharacters(page, 'left', 2);
+      await moveLeft(page, 1);
+      await selectCharacters(page, 'left', 2);
 
-    if (!isCollab) {
-      await waitForSelector(page, '.editor-image img');
+      if (!isCollab) {
+        await waitForSelector(page, '.editor-image img');
+        await assertHTML(
+          page,
+          html`
+            <p
+              class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+              dir="ltr">
+              <span data-lexical-text="true">A</span>
+              <span
+                class="editor-image"
+                contenteditable="false"
+                data-lexical-decorator="true">
+                <div draggable="false">
+                  <img
+                    class="focused"
+                    alt="Yellow flower in tilt shift lens"
+                    draggable="false"
+                    src="${SAMPLE_IMAGE_URL}"
+                    style="height: inherit; max-width: 500px; width: inherit" />
+                </div>
+              </span>
+              <span data-lexical-text="true">BC</span>
+            </p>
+          `,
+        );
+      }
+      await toggleBold(page);
       await assertHTML(
         page,
         html`
@@ -1141,7 +1308,35 @@ test.describe.parallel('TextFormatting', () => {
               data-lexical-decorator="true">
               <div draggable="false">
                 <img
-                  class="focused"
+                  alt="Yellow flower in tilt shift lens"
+                  draggable="false"
+                  src="${SAMPLE_IMAGE_URL}"
+                  style="height: inherit; max-width: 500px; width: inherit" />
+              </div>
+            </span>
+            <strong
+              class="PlaygroundEditorTheme__textBold"
+              data-lexical-text="true">
+              B
+            </strong>
+            <span data-lexical-text="true">C</span>
+          </p>
+        `,
+      );
+      await toggleBold(page);
+      await assertHTML(
+        page,
+        html`
+          <p
+            class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
+            dir="ltr">
+            <span data-lexical-text="true">A</span>
+            <span
+              class="editor-image"
+              contenteditable="false"
+              data-lexical-decorator="true">
+              <div draggable="false">
+                <img
                   alt="Yellow flower in tilt shift lens"
                   draggable="false"
                   src="${SAMPLE_IMAGE_URL}"
@@ -1152,61 +1347,8 @@ test.describe.parallel('TextFormatting', () => {
           </p>
         `,
       );
-    }
-    await toggleBold(page);
-    await assertHTML(
-      page,
-      html`
-        <p
-          class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
-          dir="ltr">
-          <span data-lexical-text="true">A</span>
-          <span
-            class="editor-image"
-            contenteditable="false"
-            data-lexical-decorator="true">
-            <div draggable="false">
-              <img
-                alt="Yellow flower in tilt shift lens"
-                draggable="false"
-                src="${SAMPLE_IMAGE_URL}"
-                style="height: inherit; max-width: 500px; width: inherit" />
-            </div>
-          </span>
-          <strong
-            class="PlaygroundEditorTheme__textBold"
-            data-lexical-text="true">
-            B
-          </strong>
-          <span data-lexical-text="true">C</span>
-        </p>
-      `,
-    );
-    await toggleBold(page);
-    await assertHTML(
-      page,
-      html`
-        <p
-          class="PlaygroundEditorTheme__paragraph PlaygroundEditorTheme__ltr"
-          dir="ltr">
-          <span data-lexical-text="true">A</span>
-          <span
-            class="editor-image"
-            contenteditable="false"
-            data-lexical-decorator="true">
-            <div draggable="false">
-              <img
-                alt="Yellow flower in tilt shift lens"
-                draggable="false"
-                src="${SAMPLE_IMAGE_URL}"
-                style="height: inherit; max-width: 500px; width: inherit" />
-            </div>
-          </span>
-          <span data-lexical-text="true">BC</span>
-        </p>
-      `,
-    );
-  });
+    },
+  );
 
   test('Multiline selection format ignores new lines', async ({
     page,

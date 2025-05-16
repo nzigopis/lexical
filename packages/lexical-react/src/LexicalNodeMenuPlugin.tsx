@@ -7,6 +7,7 @@
  */
 
 import type {MenuRenderFn, MenuResolution} from './shared/LexicalMenu';
+import type {JSX} from 'react';
 
 import {useLexicalComposerContext} from '@lexical/react/LexicalComposerContext';
 import {
@@ -18,16 +19,9 @@ import {
 } from 'lexical';
 import {useCallback, useEffect, useState} from 'react';
 import * as React from 'react';
+import {startTransition} from 'shared/reactPatches';
 
 import {LexicalMenu, MenuOption, useMenuAnchorRef} from './shared/LexicalMenu';
-
-function startTransition(callback: () => void) {
-  if (React.startTransition) {
-    React.startTransition(callback);
-  } else {
-    callback();
-  }
-}
 
 export type NodeMenuPluginProps<TOption extends MenuOption> = {
   onSelectOption: (
@@ -117,7 +111,9 @@ export function LexicalNodeMenuPlugin<TOption extends MenuOption>({
     }
   }, [editor, positionOrCloseMenu, nodeKey]);
 
-  return resolution === null || editor === null ? null : (
+  return anchorElementRef.current === null ||
+    resolution === null ||
+    editor === null ? null : (
     <LexicalMenu
       close={closeNodeMenu}
       resolution={resolution}

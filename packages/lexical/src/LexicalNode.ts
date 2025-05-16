@@ -7,20 +7,29 @@
  */
 
 /* eslint-disable no-constant-condition */
-import type {EditorConfig, LexicalEditor} from './LexicalEditor';
+import type {
+  EditorConfig,
+  Klass,
+  KlassConstructor,
+  LexicalEditor,
+} from './LexicalEditor';
 import type {BaseSelection, RangeSelection} from './LexicalSelection';
-import type {Klass, KlassConstructor} from 'lexical';
 
 import invariant from 'shared/invariant';
 
 import {
   $createParagraphNode,
+  $getCommonAncestor,
+  $getCommonAncestorResultBranchOrder,
+  $isDecoratorNode,
   $isElementNode,
-  $isParagraphNode,
   $isRootNode,
   $isTextNode,
+  type DecoratorNode,
   ElementNode,
+  NODE_STATE_KEY,
 } from '.';
+import {$updateStateFromJSON, type NodeState} from './LexicalNodeState';
 import {
   $getSelection,
   $isNodeSelection,
@@ -35,6 +44,7 @@ import {
   getActiveEditorState,
 } from './LexicalUpdates';
 import {
+  $cloneWithProperties,
   $getCompositionKey,
   $getNodeByKey,
   $isRootOrShadowRoot,
@@ -49,10 +59,33 @@ import {
 
 export type NodeMap = Map<NodeKey, LexicalNode>;
 
+/**
+ * The base type for all serialized nodes
+ */
 export type SerializedLexicalNode = {
+  /** The type string used by the Node class */
   type: string;
+  /** A numeric version for this schema, defaulting to 1, but not generally recommended for use */
   version: number;
+  [NODE_STATE_KEY]?: Record<string, unknown>;
 };
+
+/**
+ * Omit the children, type, and version properties from the given SerializedLexicalNode definition.
+ */
+export type LexicalUpdateJSON<T extends SerializedLexicalNode> = Omit<
+  T,
+  'children' | 'type' | 'version'
+>;
+
+/** @internal */
+export interface LexicalPrivateDOM {
+  __lexicalTextContent?: string | undefined | null;
+  __lexicalLineBreak?: HTMLBRElement | HTMLImageElement | undefined | null;
+  __lexicalDirTextContent?: string | undefined | null;
+  __lexicalDir?: 'ltr' | 'rtl' | null | undefined;
+  __lexicalUnmanaged?: boolean | undefined;
+}
 
 export function $removeNode(
   nodeToRemove: LexicalNode,
@@ -115,7 +148,12 @@ export function $removeNode(
   ) {
     $removeNode(parent, restoreSelection);
   }
-  if (restoreSelection && $isRootNode(parent) && parent.isEmpty()) {
+  if (
+    restoreSelection &&
+    selection &&
+    $isRootNode(parent) &&
+    parent.isEmpty()
+  ) {
     parent.selectEnd();
   }
 }
@@ -146,11 +184,16 @@ export type DOMConversionOutput = {
   node: null | LexicalNode | Array<LexicalNode>;
 };
 
+export type DOMExportOutputMap = Map<
+  Klass<LexicalNode>,
+  (editor: LexicalEditor, target: LexicalNode) => DOMExportOutput
+>;
+
 export type DOMExportOutput = {
   after?: (
-    generatedElement: HTMLElement | Text | null | undefined,
-  ) => HTMLElement | Text | null | undefined;
-  element: HTMLElement | Text | null;
+    generatedElement: HTMLElement | DocumentFragment | Text | null | undefined,
+  ) => HTMLElement | DocumentFragment | Text | null | undefined;
+  element: HTMLElement | DocumentFragment | Text | null;
 };
 
 export type NodeKey = string;
@@ -169,6 +212,8 @@ export class LexicalNode {
   __prev: null | NodeKey;
   /** @internal */
   __next: null | NodeKey;
+  /** @internal */
+  __state?: NodeState<this>;
 
   // Flow doesn't support abstract classes unfortunately, so we can't _force_
   // subclasses of Node to implement statics. All subclasses of Node should have
@@ -203,6 +248,63 @@ export class LexicalNode {
     );
   }
 
+  /**
+   * Perform any state updates on the clone of prevNode that are not already
+   * handled by the constructor call in the static clone method. If you have
+   * state to update in your clone that is not handled directly by the
+   * constructor, it is advisable to override this method but it is required
+   * to include a call to `super.afterCloneFrom(prevNode)` in your
+   * implementation. This is only intended to be called by
+   * {@link $cloneWithProperties} function or via a super call.
+   *
+   * @example
+   * ```ts
+   * class ClassesTextNode extends TextNode {
+   *   // Not shown: static getType, static importJSON, exportJSON, createDOM, updateDOM
+   *   __classes = new Set<string>();
+   *   static clone(node: ClassesTextNode): ClassesTextNode {
+   *     // The inherited TextNode constructor is used here, so
+   *     // classes is not set by this method.
+   *     return new ClassesTextNode(node.__text, node.__key);
+   *   }
+   *   afterCloneFrom(node: this): void {
+   *     // This calls TextNode.afterCloneFrom and LexicalNode.afterCloneFrom
+   *     // for necessary state updates
+   *     super.afterCloneFrom(node);
+   *     this.__addClasses(node.__classes);
+   *   }
+   *   // This method is a private implementation detail, it is not
+   *   // suitable for the public API because it does not call getWritable
+   *   __addClasses(classNames: Iterable<string>): this {
+   *     for (const className of classNames) {
+   *       this.__classes.add(className);
+   *     }
+   *     return this;
+   *   }
+   *   addClass(...classNames: string[]): this {
+   *     return this.getWritable().__addClasses(classNames);
+   *   }
+   *   removeClass(...classNames: string[]): this {
+   *     const node = this.getWritable();
+   *     for (const className of classNames) {
+   *       this.__classes.delete(className);
+   *     }
+   *     return this;
+   *   }
+   *   getClasses(): Set<string> {
+   *     return this.getLatest().__classes;
+   *   }
+   * }
+   * ```
+   *
+   */
+  afterCloneFrom(prevNode: this): void {
+    this.__parent = prevNode.__parent;
+    this.__next = prevNode.__next;
+    this.__prev = prevNode.__prev;
+    this.__state = prevNode.__state;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static importDOM?: () => DOMConversionMap<any> | null;
 
@@ -211,6 +313,12 @@ export class LexicalNode {
     this.__parent = null;
     this.__prev = null;
     this.__next = null;
+    Object.defineProperty(this, '__state', {
+      configurable: true,
+      enumerable: false,
+      value: undefined,
+      writable: true,
+    });
     $setNodeKey(this, key);
 
     if (__DEV__) {
@@ -240,7 +348,7 @@ export class LexicalNode {
   /**
    * Returns true if there is a path between this node and the RootNode, false otherwise.
    * This is a way of determining if the node is "attached" EditorState. Unattached nodes
-   * won't be reconciled and will ultimatelt be cleaned up by the Lexical GC.
+   * won't be reconciled and will ultimately be cleaned up by the Lexical GC.
    */
   isAttached(): boolean {
     let nodeKey: string | null = this.__key;
@@ -281,14 +389,29 @@ export class LexicalNode {
     }
     // For inline images inside of element nodes.
     // Without this change the image will be selected if the cursor is before or after it.
-    if (
+    const isElementRangeSelection =
       $isRangeSelection(targetSelection) &&
       targetSelection.anchor.type === 'element' &&
-      targetSelection.focus.type === 'element' &&
-      targetSelection.anchor.key === targetSelection.focus.key &&
-      targetSelection.anchor.offset === targetSelection.focus.offset
-    ) {
-      return false;
+      targetSelection.focus.type === 'element';
+
+    if (isElementRangeSelection) {
+      if (targetSelection.isCollapsed()) {
+        return false;
+      }
+
+      const parentNode = this.getParent();
+      if ($isDecoratorNode(this) && this.isInline() && parentNode) {
+        const firstPoint = targetSelection.isBackward()
+          ? targetSelection.focus
+          : targetSelection.anchor;
+        if (
+          parentNode.is(firstPoint.getNode()) &&
+          firstPoint.offset === parentNode.getChildrenSize() &&
+          this.is(parentNode.getLastChild())
+        ) {
+          return false;
+        }
+      }
     }
     return isSelected;
   }
@@ -348,14 +471,14 @@ export class LexicalNode {
    * non-root ancestor of this node, or null if none is found. See {@link lexical!$isRootOrShadowRoot}
    * for more information on which Elements comprise "roots".
    */
-  getTopLevelElement(): ElementNode | null {
+  getTopLevelElement(): ElementNode | DecoratorNode<unknown> | null {
     let node: ElementNode | this | null = this;
     while (node !== null) {
       const parent: ElementNode | null = node.getParent();
       if ($isRootOrShadowRoot(parent)) {
         invariant(
-          $isElementNode(node),
-          'Children of root nodes must be elements',
+          $isElementNode(node) || (node === this && $isDecoratorNode(node)),
+          'Children of root nodes must be elements or decorators',
         );
         return node;
       }
@@ -369,7 +492,7 @@ export class LexicalNode {
    * non-root ancestor of this node, or throws if none is found. See {@link lexical!$isRootOrShadowRoot}
    * for more information on which Elements comprise "roots".
    */
-  getTopLevelElementOrThrow(): ElementNode {
+  getTopLevelElementOrThrow(): ElementNode | DecoratorNode<unknown> {
     const parent = this.getTopLevelElement();
     if (parent === null) {
       invariant(
@@ -471,6 +594,8 @@ export class LexicalNode {
   }
 
   /**
+   * @deprecated use {@link $getCommonAncestor}
+   *
    * Returns the closest common ancestor of this node and the provided one or null
    * if one cannot be found.
    *
@@ -479,27 +604,12 @@ export class LexicalNode {
   getCommonAncestor<T extends ElementNode = ElementNode>(
     node: LexicalNode,
   ): T | null {
-    const a = this.getParents();
-    const b = node.getParents();
-    if ($isElementNode(this)) {
-      a.unshift(this);
-    }
-    if ($isElementNode(node)) {
-      b.unshift(node);
-    }
-    const aLength = a.length;
-    const bLength = b.length;
-    if (aLength === 0 || bLength === 0 || a[aLength - 1] !== b[bLength - 1]) {
-      return null;
-    }
-    const bSet = new Set(b);
-    for (let i = 0; i < aLength; i++) {
-      const ancestor = a[i] as T;
-      if (bSet.has(ancestor)) {
-        return ancestor;
-      }
-    }
-    return null;
+    const a = $isElementNode(this) ? this : this.getParent();
+    const b = $isElementNode(node) ? node : node.getParent();
+    const result = a && b ? $getCommonAncestor(a, b) : null;
+    return result
+      ? (result.commonAncestor as T) /* TODO this type cast is a lie, but fixing it would break backwards compatibility */
+      : null;
   }
 
   /**
@@ -516,62 +626,42 @@ export class LexicalNode {
   }
 
   /**
-   * Returns true if this node logical precedes the target node in the editor state.
+   * Returns true if this node logically precedes the target node in the
+   * editor state, false otherwise (including if there is no common ancestor).
+   *
+   * Note that this notion of isBefore is based on post-order; a descendant
+   * node is always before its ancestors. See also
+   * {@link $getCommonAncestor} and {@link $comparePointCaretNext} for
+   * more flexible ways to determine the relative positions of nodes.
    *
    * @param targetNode - the node we're testing to see if it's after this one.
    */
   isBefore(targetNode: LexicalNode): boolean {
-    if (this === targetNode) {
+    const compare = $getCommonAncestor(this, targetNode);
+    if (compare === null) {
       return false;
     }
-    if (targetNode.isParentOf(this)) {
+    if (compare.type === 'descendant') {
       return true;
     }
-    if (this.isParentOf(targetNode)) {
-      return false;
+    if (compare.type === 'branch') {
+      return $getCommonAncestorResultBranchOrder(compare) === -1;
     }
-    const commonAncestor = this.getCommonAncestor(targetNode);
-    let indexA = 0;
-    let indexB = 0;
-    let node: this | ElementNode | LexicalNode = this;
-    while (true) {
-      const parent: ElementNode = node.getParentOrThrow();
-      if (parent === commonAncestor) {
-        indexA = node.getIndexWithinParent();
-        break;
-      }
-      node = parent;
-    }
-    node = targetNode;
-    while (true) {
-      const parent: ElementNode = node.getParentOrThrow();
-      if (parent === commonAncestor) {
-        indexB = node.getIndexWithinParent();
-        break;
-      }
-      node = parent;
-    }
-    return indexA < indexB;
+    invariant(
+      compare.type === 'same' || compare.type === 'ancestor',
+      'LexicalNode.isBefore: exhaustiveness check',
+    );
+    return false;
   }
 
   /**
-   * Returns true if this node is the parent of the target node, false otherwise.
+   * Returns true if this node is an ancestor of and distinct from the target node, false otherwise.
    *
    * @param targetNode - the would-be child node.
    */
   isParentOf(targetNode: LexicalNode): boolean {
-    const key = this.__key;
-    if (key === targetNode.__key) {
-      return false;
-    }
-    let node: ElementNode | LexicalNode | null = targetNode;
-    while (node !== null) {
-      if (node.__key === key) {
-        return true;
-      }
-      node = node.getParent();
-    }
-    return false;
+    const result = $getCommonAncestor(this, targetNode);
+    return result !== null && result.type === 'ancestor';
   }
 
   // TO-DO: this function can be simplified a lot
@@ -674,8 +764,9 @@ export class LexicalNode {
   }
 
   /**
-   * Returns a mutable version of the node. Will throw an error if
-   * called outside of a Lexical Editor {@link LexicalEditor.update} callback.
+   * Returns a mutable version of the node using {@link $cloneWithProperties}
+   * if necessary. Will throw an error if called outside of a Lexical Editor
+   * {@link LexicalEditor.update} callback.
    *
    */
   getWritable(): this {
@@ -686,7 +777,6 @@ export class LexicalNode {
     const key = this.__key;
     // Ensure we get the latest node from pending state
     const latestNode = this.getLatest();
-    const parent = latestNode.__parent;
     const cloneNotNeeded = editor._cloneNotNeeded;
     const selection = $getSelection();
     if (selection !== null) {
@@ -697,34 +787,12 @@ export class LexicalNode {
       internalMarkNodeAsDirty(latestNode);
       return latestNode;
     }
-    const constructor = latestNode.constructor;
-    const mutableNode = constructor.clone(latestNode);
-    mutableNode.__parent = parent;
-    mutableNode.__next = latestNode.__next;
-    mutableNode.__prev = latestNode.__prev;
-    if ($isElementNode(latestNode) && $isElementNode(mutableNode)) {
-      if ($isParagraphNode(latestNode) && $isParagraphNode(mutableNode)) {
-        mutableNode.__textFormat = latestNode.__textFormat;
-      }
-      mutableNode.__first = latestNode.__first;
-      mutableNode.__last = latestNode.__last;
-      mutableNode.__size = latestNode.__size;
-      mutableNode.__indent = latestNode.__indent;
-      mutableNode.__format = latestNode.__format;
-      mutableNode.__dir = latestNode.__dir;
-    } else if ($isTextNode(latestNode) && $isTextNode(mutableNode)) {
-      mutableNode.__format = latestNode.__format;
-      mutableNode.__style = latestNode.__style;
-      mutableNode.__mode = latestNode.__mode;
-      mutableNode.__detail = latestNode.__detail;
-    }
+    const mutableNode = $cloneWithProperties(latestNode);
     cloneNotNeeded.add(key);
-    mutableNode.__key = key;
     internalMarkNodeAsDirty(mutableNode);
     // Update reference in node map
     nodeMap.set(key, mutableNode);
 
-    // @ts-expect-error
     return mutableNode;
   }
 
@@ -754,7 +822,7 @@ export class LexicalNode {
    *
    * This method must return exactly one HTMLElement. Nested elements are not supported.
    *
-   * Do not attempt to update the Lexical EditorState during this phase of the update lifecyle.
+   * Do not attempt to update the Lexical EditorState during this phase of the update lifecycle.
    *
    * @param _config - allows access to things like the EditorTheme (to apply classes) during reconciliation.
    * @param _editor - allows access to the editor for context during reconciliation.
@@ -803,7 +871,13 @@ export class LexicalNode {
    *
    * */
   exportJSON(): SerializedLexicalNode {
-    invariant(false, 'exportJSON: base method not extended');
+    // eslint-disable-next-line dot-notation
+    const state = this.__state ? this.__state.toJSON() : undefined;
+    return {
+      type: this.__type,
+      version: 1,
+      ...state,
+    };
   }
 
   /**
@@ -820,6 +894,41 @@ export class LexicalNode {
       this.name,
     );
   }
+
+  /**
+   * Update this LexicalNode instance from serialized JSON. It's recommended
+   * to implement as much logic as possible in this method instead of the
+   * static importJSON method, so that the functionality can be inherited in subclasses.
+   *
+   * The LexicalUpdateJSON utility type should be used to ignore any type, version,
+   * or children properties in the JSON so that the extended JSON from subclasses
+   * are acceptable parameters for the super call.
+   *
+   * If overridden, this method must call super.
+   *
+   * @example
+   * ```ts
+   * class MyTextNode extends TextNode {
+   *   // ...
+   *   static importJSON(serializedNode: SerializedMyTextNode): MyTextNode {
+   *     return $createMyTextNode()
+   *       .updateFromJSON(serializedNode);
+   *   }
+   *   updateFromJSON(
+   *     serializedNode: LexicalUpdateJSON<SerializedMyTextNode>,
+   *   ): this {
+   *     return super.updateFromJSON(serializedNode)
+   *       .setMyProperty(serializedNode.myProperty);
+   *   }
+   * }
+   * ```
+   **/
+  updateFromJSON(
+    serializedNode: LexicalUpdateJSON<SerializedLexicalNode>,
+  ): this {
+    return $updateStateFromJSON(this, serializedNode[NODE_STATE_KEY]);
+  }
+
   /**
    * @experimental
    *
@@ -1102,6 +1211,16 @@ export class LexicalNode {
    * */
   markDirty(): void {
     this.getWritable();
+  }
+
+  /**
+   * @internal
+   *
+   * When the reconciler detects that a node was mutated, this method
+   * may be called to restore the node to a known good state.
+   */
+  reconcileObservedMutation(dom: HTMLElement, editor: LexicalEditor): void {
+    this.markDirty();
   }
 }
 

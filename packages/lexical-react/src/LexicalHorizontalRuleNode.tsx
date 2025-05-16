@@ -16,6 +16,7 @@ import type {
   NodeKey,
   SerializedLexicalNode,
 } from 'lexical';
+import type {JSX} from 'react';
 
 import {useLexicalComposerContext} from '@lexical/react/LexicalComposerContext';
 import {useLexicalNodeSelection} from '@lexical/react/useLexicalNodeSelection';
@@ -26,18 +27,13 @@ import {
 } from '@lexical/utils';
 import {
   $applyNodeReplacement,
-  $getNodeByKey,
-  $getSelection,
-  $isNodeSelection,
   CLICK_COMMAND,
   COMMAND_PRIORITY_LOW,
   createCommand,
   DecoratorNode,
-  KEY_BACKSPACE_COMMAND,
-  KEY_DELETE_COMMAND,
 } from 'lexical';
 import * as React from 'react';
-import {useCallback, useEffect} from 'react';
+import {useEffect} from 'react';
 
 export type SerializedHorizontalRuleNode = SerializedLexicalNode;
 
@@ -48,21 +44,6 @@ function HorizontalRuleComponent({nodeKey}: {nodeKey: NodeKey}) {
   const [editor] = useLexicalComposerContext();
   const [isSelected, setSelected, clearSelection] =
     useLexicalNodeSelection(nodeKey);
-
-  const $onDelete = useCallback(
-    (event: KeyboardEvent) => {
-      if (isSelected && $isNodeSelection($getSelection())) {
-        event.preventDefault();
-        const node = $getNodeByKey(nodeKey);
-        if ($isHorizontalRuleNode(node)) {
-          node.remove();
-          return true;
-        }
-      }
-      return false;
-    },
-    [isSelected, nodeKey],
-  );
 
   useEffect(() => {
     return mergeRegister(
@@ -83,22 +64,12 @@ function HorizontalRuleComponent({nodeKey}: {nodeKey: NodeKey}) {
         },
         COMMAND_PRIORITY_LOW,
       ),
-      editor.registerCommand(
-        KEY_DELETE_COMMAND,
-        $onDelete,
-        COMMAND_PRIORITY_LOW,
-      ),
-      editor.registerCommand(
-        KEY_BACKSPACE_COMMAND,
-        $onDelete,
-        COMMAND_PRIORITY_LOW,
-      ),
     );
-  }, [clearSelection, editor, isSelected, nodeKey, $onDelete, setSelected]);
+  }, [clearSelection, editor, isSelected, nodeKey, setSelected]);
 
   useEffect(() => {
     const hrElem = editor.getElementByKey(nodeKey);
-    const isSelectedClassName = 'selected';
+    const isSelectedClassName = editor._config.theme.hrSelected ?? 'selected';
 
     if (hrElem !== null) {
       if (isSelected) {
@@ -124,7 +95,7 @@ export class HorizontalRuleNode extends DecoratorNode<JSX.Element> {
   static importJSON(
     serializedNode: SerializedHorizontalRuleNode,
   ): HorizontalRuleNode {
-    return $createHorizontalRuleNode();
+    return $createHorizontalRuleNode().updateFromJSON(serializedNode);
   }
 
   static importDOM(): DOMConversionMap | null {
@@ -133,13 +104,6 @@ export class HorizontalRuleNode extends DecoratorNode<JSX.Element> {
         conversion: $convertHorizontalRuleElement,
         priority: 0,
       }),
-    };
-  }
-
-  exportJSON(): SerializedLexicalNode {
-    return {
-      type: 'horizontalrule',
-      version: 1,
     };
   }
 

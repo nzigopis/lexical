@@ -6,6 +6,13 @@
  *
  */
 
+import {useCollaborationContext} from '@lexical/react/LexicalCollaborationContext';
+import {CollaborationPlugin} from '@lexical/react/LexicalCollaborationPlugin';
+import {LexicalComposer} from '@lexical/react/LexicalComposer';
+import {useLexicalComposerContext} from '@lexical/react/LexicalComposerContext';
+import {ContentEditable} from '@lexical/react/LexicalContentEditable';
+import {LexicalErrorBoundary} from '@lexical/react/LexicalErrorBoundary';
+import {RichTextPlugin} from '@lexical/react/LexicalRichTextPlugin';
 import {Provider, UserState} from '@lexical/yjs';
 import {LexicalEditor} from 'lexical';
 import * as React from 'react';
@@ -14,24 +21,18 @@ import {createRoot, Root} from 'react-dom/client';
 import * as ReactTestUtils from 'shared/react-test-utils';
 import * as Y from 'yjs';
 
-import {useCollaborationContext} from '../../LexicalCollaborationContext';
-import {CollaborationPlugin} from '../../LexicalCollaborationPlugin';
-import {LexicalComposer} from '../../LexicalComposer';
-import {useLexicalComposerContext} from '../../LexicalComposerContext';
-import {ContentEditable} from '../../LexicalContentEditable';
-import {LexicalErrorBoundary} from '../../LexicalErrorBoundary';
-import {RichTextPlugin} from '../../LexicalRichTextPlugin';
-
 function Editor({
   doc,
   provider,
   setEditor,
   awarenessData,
+  shouldBootstrapEditor = true,
 }: {
   doc: Y.Doc;
   provider: Provider;
   setEditor: (editor: LexicalEditor) => void;
   awarenessData?: object | undefined;
+  shouldBootstrapEditor?: boolean;
 }) {
   const context = useCollaborationContext();
 
@@ -48,7 +49,7 @@ function Editor({
       <CollaborationPlugin
         id="main"
         providerFactory={() => provider}
-        shouldBootstrap={true}
+        shouldBootstrap={shouldBootstrapEditor}
         awarenessData={awarenessData}
       />
       <RichTextPlugin
@@ -80,6 +81,7 @@ export class Client implements Provider {
     off(): void;
     on(): void;
     setLocalState: (state: UserState) => void;
+    setLocalStateField: (field: string, value: unknown) => void;
   };
 
   constructor(id: Client['_id'], connection: Client['_connection']) {
@@ -102,6 +104,9 @@ export class Client implements Provider {
 
       setLocalState: (state) => {
         this._awarenessState = state;
+      },
+      setLocalStateField: (field: string, value: unknown) => {
+        // TODO
       },
     };
   }
@@ -148,7 +153,15 @@ export class Client implements Provider {
     this._connected = false;
   }
 
-  start(rootContainer: Container, awarenessData?: object) {
+  /**
+   * @param options
+   *  - shouldBootstrapEditor: Whether to initialize the editor with an empty paragraph
+   */
+  start(
+    rootContainer: Container,
+    awarenessData?: object,
+    options: {shouldBootstrapEditor?: boolean} = {},
+  ) {
     const container = document.createElement('div');
     const reactRoot = createRoot(container);
     this._container = container;
@@ -162,8 +175,8 @@ export class Client implements Provider {
           initialConfig={{
             editorState: null,
             namespace: '',
-            onError: () => {
-              throw Error();
+            onError: (e) => {
+              throw e;
             },
           }}>
           <Editor
@@ -171,6 +184,7 @@ export class Client implements Provider {
             doc={this._doc}
             setEditor={(editor) => (this._editor = editor)}
             awarenessData={awarenessData}
+            shouldBootstrapEditor={options.shouldBootstrapEditor}
           />
         </LexicalComposer>,
       );
@@ -219,6 +233,10 @@ export class Client implements Provider {
 
   getHTML() {
     return (this.getContainer().firstChild as HTMLElement).innerHTML;
+  }
+
+  getDoc() {
+    return this._doc;
   }
 
   getDocJSON() {

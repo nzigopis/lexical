@@ -41,7 +41,7 @@ function createUID(): string {
   return Math.random()
     .toString(36)
     .replace(/[^a-z]+/g, '')
-    .substr(0, 5);
+    .substring(0, 5);
 }
 
 export function createComment(
@@ -56,7 +56,10 @@ export function createComment(
     content,
     deleted: deleted === undefined ? false : deleted,
     id: id === undefined ? createUID() : id,
-    timeStamp: timeStamp === undefined ? performance.now() : timeStamp,
+    timeStamp:
+      timeStamp === undefined
+        ? performance.timeOrigin + performance.now()
+        : timeStamp,
     type: 'comment',
   };
 }

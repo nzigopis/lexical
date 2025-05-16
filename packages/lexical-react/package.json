@@ -8,27 +8,24 @@
     "rich-text"
   ],
   "license": "MIT",
-  "version": "0.16.1",
+  "version": "0.31.1",
   "dependencies": {
-    "@lexical/clipboard": "0.16.1",
-    "@lexical/code": "0.16.1",
-    "@lexical/devtools-core": "0.16.1",
-    "@lexical/dragon": "0.16.1",
-    "@lexical/hashtag": "0.16.1",
-    "@lexical/history": "0.16.1",
-    "@lexical/link": "0.16.1",
-    "@lexical/list": "0.16.1",
-    "@lexical/mark": "0.16.1",
-    "@lexical/markdown": "0.16.1",
-    "@lexical/overflow": "0.16.1",
-    "@lexical/plain-text": "0.16.1",
-    "@lexical/rich-text": "0.16.1",
-    "@lexical/selection": "0.16.1",
-    "@lexical/table": "0.16.1",
-    "@lexical/text": "0.16.1",
-    "@lexical/utils": "0.16.1",
-    "@lexical/yjs": "0.16.1",
-    "lexical": "0.16.1",
+    "@lexical/devtools-core": "0.31.1",
+    "@lexical/dragon": "0.31.1",
+    "@lexical/hashtag": "0.31.1",
+    "@lexical/history": "0.31.1",
+    "@lexical/link": "0.31.1",
+    "@lexical/list": "0.31.1",
+    "@lexical/mark": "0.31.1",
+    "@lexical/markdown": "0.31.1",
+    "@lexical/overflow": "0.31.1",
+    "@lexical/plain-text": "0.31.1",
+    "@lexical/rich-text": "0.31.1",
+    "@lexical/table": "0.31.1",
+    "@lexical/text": "0.31.1",
+    "@lexical/utils": "0.31.1",
+    "@lexical/yjs": "0.31.1",
+    "lexical": "0.31.1",
     "react-error-boundary": "^3.1.4"
   },
   "peerDependencies": {
@@ -491,6 +488,36 @@
         "default": "./LexicalDecoratorBlockNode.js"
       }
     },
+    "./LexicalDraggableBlockPlugin": {
+      "import": {
+        "types": "./LexicalDraggableBlockPlugin.d.ts",
+        "development": "./LexicalDraggableBlockPlugin.dev.mjs",
+        "production": "./LexicalDraggableBlockPlugin.prod.mjs",
+        "node": "./LexicalDraggableBlockPlugin.node.mjs",
+        "default": "./LexicalDraggableBlockPlugin.mjs"
+      },
+      "require": {
+        "types": "./LexicalDraggableBlockPlugin.d.ts",
+        "development": "./LexicalDraggableBlockPlugin.dev.js",
+        "production": "./LexicalDraggableBlockPlugin.prod.js",
+        "default": "./LexicalDraggableBlockPlugin.js"
+      }
+    },
+    "./LexicalDraggableBlockPlugin.js": {
+      "import": {
+        "types": "./LexicalDraggableBlockPlugin.d.ts",
+        "development": "./LexicalDraggableBlockPlugin.dev.mjs",
+        "production": "./LexicalDraggableBlockPlugin.prod.mjs",
+        "node": "./LexicalDraggableBlockPlugin.node.mjs",
+        "default": "./LexicalDraggableBlockPlugin.mjs"
+      },
+      "require": {
+        "types": "./LexicalDraggableBlockPlugin.d.ts",
+        "development": "./LexicalDraggableBlockPlugin.dev.js",
+        "production": "./LexicalDraggableBlockPlugin.prod.js",
+        "default": "./LexicalDraggableBlockPlugin.js"
+      }
+    },
     "./LexicalEditorRefPlugin": {
       "import": {
         "types": "./LexicalEditorRefPlugin.d.ts",
@@ -941,6 +968,36 @@
         "default": "./LexicalRichTextPlugin.js"
       }
     },
+    "./LexicalSelectionAlwaysOnDisplay": {
+      "import": {
+        "types": "./LexicalSelectionAlwaysOnDisplay.d.ts",
+        "development": "./LexicalSelectionAlwaysOnDisplay.dev.mjs",
+        "production": "./LexicalSelectionAlwaysOnDisplay.prod.mjs",
+        "node": "./LexicalSelectionAlwaysOnDisplay.node.mjs",
+        "default": "./LexicalSelectionAlwaysOnDisplay.mjs"
+      },
+      "require": {
+        "types": "./LexicalSelectionAlwaysOnDisplay.d.ts",
+        "development": "./LexicalSelectionAlwaysOnDisplay.dev.js",
+        "production": "./LexicalSelectionAlwaysOnDisplay.prod.js",
+        "default": "./LexicalSelectionAlwaysOnDisplay.js"
+      }
+    },
+    "./LexicalSelectionAlwaysOnDisplay.js": {
+      "import": {
+        "types": "./LexicalSelectionAlwaysOnDisplay.d.ts",
+        "development": "./LexicalSelectionAlwaysOnDisplay.dev.mjs",
+        "production": "./LexicalSelectionAlwaysOnDisplay.prod.mjs",
+        "node": "./LexicalSelectionAlwaysOnDisplay.node.mjs",
+        "default": "./LexicalSelectionAlwaysOnDisplay.mjs"
+      },
+      "require": {
+        "types": "./LexicalSelectionAlwaysOnDisplay.d.ts",
+        "development": "./LexicalSelectionAlwaysOnDisplay.dev.js",
+        "production": "./LexicalSelectionAlwaysOnDisplay.prod.js",
+        "default": "./LexicalSelectionAlwaysOnDisplay.js"
+      }
+    },
     "./LexicalTabIndentationPlugin": {
       "import": {
         "types": "./LexicalTabIndentationPlugin.d.ts",
@@ -969,36 +1026,6 @@
         "development": "./LexicalTabIndentationPlugin.dev.js",
         "production": "./LexicalTabIndentationPlugin.prod.js",
         "default": "./LexicalTabIndentationPlugin.js"
-      }
-    },
-    "./LexicalTableOfContents": {
-      "import": {
-        "types": "./LexicalTableOfContents.d.ts",
-        "development": "./LexicalTableOfContents.dev.mjs",
-        "production": "./LexicalTableOfContents.prod.mjs",
-        "node": "./LexicalTableOfContents.node.mjs",
-        "default": "./LexicalTableOfContents.mjs"
-      },
-      "require": {
-        "types": "./LexicalTableOfContents.d.ts",
-        "development": "./LexicalTableOfContents.dev.js",
-        "production": "./LexicalTableOfContents.prod.js",
-        "default": "./LexicalTableOfContents.js"
-      }
-    },
-    "./LexicalTableOfContents.js": {
-      "import": {
-        "types": "./LexicalTableOfContents.d.ts",
-        "development": "./LexicalTableOfContents.dev.mjs",
-        "production": "./LexicalTableOfContents.prod.mjs",
-        "node": "./LexicalTableOfContents.node.mjs",
-        "default": "./LexicalTableOfContents.mjs"
-      },
-      "require": {
-        "types": "./LexicalTableOfContents.d.ts",
-        "development": "./LexicalTableOfContents.dev.js",
-        "production": "./LexicalTableOfContents.prod.js",
-        "default": "./LexicalTableOfContents.js"
       }
     },
     "./LexicalTableOfContentsPlugin": {

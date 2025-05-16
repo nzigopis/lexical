@@ -18,6 +18,9 @@ import {
   CLEAR_EDITOR_COMMAND,
   CLEAR_HISTORY_COMMAND,
   COMMAND_PRIORITY_EDITOR,
+  HISTORIC_TAG,
+  HISTORY_MERGE_TAG,
+  HISTORY_PUSH_TAG,
   REDO_COMMAND,
   UNDO_COMMAND,
 } from 'lexical';
@@ -193,25 +196,26 @@ function isTextNodeUnchanged(
 
   const prevSelection = prevEditorState._selection;
   const nextSelection = nextEditorState._selection;
-  let isDeletingLine = false;
+  const isDeletingLine =
+    $isRangeSelection(prevSelection) &&
+    $isRangeSelection(nextSelection) &&
+    prevSelection.anchor.type === 'element' &&
+    prevSelection.focus.type === 'element' &&
+    nextSelection.anchor.type === 'text' &&
+    nextSelection.focus.type === 'text';
 
-  if ($isRangeSelection(prevSelection) && $isRangeSelection(nextSelection)) {
-    isDeletingLine =
-      prevSelection.anchor.type === 'element' &&
-      prevSelection.focus.type === 'element' &&
-      nextSelection.anchor.type === 'text' &&
-      nextSelection.focus.type === 'text';
-  }
-
-  if (!isDeletingLine && $isTextNode(prevNode) && $isTextNode(nextNode)) {
+  if (
+    !isDeletingLine &&
+    $isTextNode(prevNode) &&
+    $isTextNode(nextNode) &&
+    prevNode.__parent === nextNode.__parent
+  ) {
+    // This has the assumption that object key order won't change if the
+    // content did not change, which should normally be safe given
+    // the manner in which nodes and exportJSON are typically implemented.
     return (
-      prevNode.__type === nextNode.__type &&
-      prevNode.__text === nextNode.__text &&
-      prevNode.__mode === nextNode.__mode &&
-      prevNode.__detail === nextNode.__detail &&
-      prevNode.__style === nextNode.__style &&
-      prevNode.__format === nextNode.__format &&
-      prevNode.__parent === nextNode.__parent
+      JSON.stringify(prevEditorState.read(() => prevNode.exportJSON())) ===
+      JSON.stringify(nextEditorState.read(() => nextNode.exportJSON()))
     );
   }
   return false;
@@ -243,7 +247,7 @@ function createMergeActionGetter(
 
     // If applying changes from history stack there's no need
     // to run history logic again, as history entries already calculated
-    if (tags.has('historic')) {
+    if (tags.has(HISTORIC_TAG)) {
       prevChangeType = OTHER;
       prevChangeTime = changeTime;
       return DISCARD_HISTORY_CANDIDATE;
@@ -260,9 +264,9 @@ function createMergeActionGetter(
     const mergeAction = (() => {
       const isSameEditor =
         currentHistoryEntry === null || currentHistoryEntry.editor === editor;
-      const shouldPushHistory = tags.has('history-push');
+      const shouldPushHistory = tags.has(HISTORY_PUSH_TAG);
       const shouldMergeHistory =
-        !shouldPushHistory && isSameEditor && tags.has('history-merge');
+        !shouldPushHistory && isSameEditor && tags.has(HISTORY_MERGE_TAG);
 
       if (shouldMergeHistory) {
         return HISTORY_MERGE;
@@ -336,7 +340,7 @@ function redo(editor: LexicalEditor, historyState: HistoryState): void {
 
     if (historyStateEntry) {
       historyStateEntry.editor.setEditorState(historyStateEntry.editorState, {
-        tag: 'historic',
+        tag: HISTORIC_TAG,
       });
     }
   }
@@ -364,7 +368,7 @@ function undo(editor: LexicalEditor, historyState: HistoryState): void {
 
     if (historyStateEntry) {
       historyStateEntry.editor.setEditorState(historyStateEntry.editorState, {
-        tag: 'historic',
+        tag: HISTORIC_TAG,
       });
     }
   }

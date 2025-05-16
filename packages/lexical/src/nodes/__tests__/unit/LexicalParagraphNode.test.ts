@@ -46,13 +46,14 @@ describe('LexicalParagraphNode tests', () => {
         // If you broke this test, you changed the public interface of a
         // serialized Lexical Core Node. Please ensure the correct adapter
         // logic is in place in the corresponding importJSON  method
-        // to accomodate these changes.
+        // to accommodate these changes.
         expect(node.exportJSON()).toStrictEqual({
           children: [],
           direction: null,
           format: '',
           indent: 0,
           textFormat: 0,
+          textStyle: '',
           type: 'paragraph',
           version: 1,
         });

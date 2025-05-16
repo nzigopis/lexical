@@ -29,8 +29,10 @@ export function useLexicalSubscription<T>(
     () => subscription(editor),
     [editor, subscription],
   );
-  const valueRef = useRef<T>(initializedSubscription.initialValueFn());
-  const [value, setValue] = useState<T>(valueRef.current);
+  const [value, setValue] = useState<T>(() =>
+    initializedSubscription.initialValueFn(),
+  );
+  const valueRef = useRef<T>(value);
   useLayoutEffect(() => {
     const {initialValueFn, subscribe} = initializedSubscription;
     const currentValue = initialValueFn();
@@ -47,7 +49,3 @@ export function useLexicalSubscription<T>(
 
   return value;
 }
-
-/** @deprecated use the named export {@link useLexicalSubscription} */
-// eslint-disable-next-line no-restricted-exports
-export default useLexicalSubscription;

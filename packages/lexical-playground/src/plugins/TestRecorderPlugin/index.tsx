@@ -7,13 +7,18 @@
  */
 
 import type {BaseSelection, LexicalEditor} from 'lexical';
+import type {JSX} from 'react';
 
 import {useLexicalComposerContext} from '@lexical/react/LexicalComposerContext';
-import {$createParagraphNode, $createTextNode, $getRoot} from 'lexical';
+import {IS_APPLE} from '@lexical/utils';
+import {
+  $createParagraphNode,
+  $createTextNode,
+  $getRoot,
+  getDOMSelection,
+} from 'lexical';
 import * as React from 'react';
-import {useCallback, useEffect, useRef, useState} from 'react';
-import {IS_APPLE} from 'shared/environment';
-import useLayoutEffect from 'shared/useLayoutEffect';
+import {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
 
 const copy = (text: string | null) => {
   const textArea = document.createElement('textarea');
@@ -167,7 +172,7 @@ function useTestRecorder(
 
   const generateTestContent = useCallback(() => {
     const rootElement = editor.getRootElement();
-    const browserSelection = window.getSelection();
+    const browserSelection = getDOMSelection(editor._window);
 
     if (
       rootElement == null ||
@@ -322,7 +327,7 @@ ${steps.map(formatStep).join(`\n`)}
             dirtyElements.size === 0 &&
             !skipNextSelectionChange
           ) {
-            const browserSelection = window.getSelection();
+            const browserSelection = getDOMSelection(editor._window);
             if (
               browserSelection &&
               (browserSelection.anchorNode == null ||
@@ -379,7 +384,7 @@ ${steps.map(formatStep).join(`\n`)}
     if (!isRecording) {
       return;
     }
-    const browserSelection = window.getSelection();
+    const browserSelection = getDOMSelection(getCurrentEditor()._window);
     if (
       browserSelection === null ||
       browserSelection.anchorNode == null ||
